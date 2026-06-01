@@ -1,0 +1,106 @@
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const SPOTIFY_CLIENT_ID = (import.meta as any).env.VITE_SPOTIFY_CLIENT_ID as string;
+const REDIRECT_URI = window.location.origin;
+
+const SCOPES = [
+  'streaming',
+  'user-read-email',
+  'user-read-private',
+  'playlist-read-private',
+  'playlist-read-collaborative',
+  'user-read-playback-state',
+  'user-modify-playback-state',
+  'user-library-read',
+].join(' ');
+
+// ── PKCE helpers ───────────────────────────────────────────
+
+function randomBytes(len: number): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(len));
+}
+
+function base64url(buf: Uint8Array): string {
+  return btoa(String.fromCharCode(...buf))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+async function sha256(plain: string): Promise<Uint8Array> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(plain));
+  return new Uint8Array(buf);
+}
+
+export async function redirectToSpotifyLogin() {
+  const verifier = base64url(randomBytes(32));
+  const challenge = base64url(await sha256(verifier));
+
+  sessionStorage.setItem('pkce_verifier', verifier);
+
+  const params = new URLSearchParams({
+    client_id: SPOTIFY_CLIENT_ID,
+    response_type: 'code',
+    redirect_uri: REDIRECT_URI,
+    scope: SCOPES,
+    code_challenge_method: 'S256',
+    code_challenge: challenge,
+  });
+
+  window.location.href = `https://accounts.spotify.com/authorize?${params}`;
+}
+
+export async function exchangeCodeForToken(code: string): Promise<string> {
+  const verifier = sessionStorage.getItem('pkce_verifier');
+  if (!verifier) throw new Error('No PKCE verifier found');
+
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: SPOTIFY_CLIENT_ID,
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: REDIRECT_URI,
+      code_verifier: verifier,
+    }),
+  });
+
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+
+  sessionStorage.removeItem('pkce_verifier');
+  localStorage.setItem('spot_token', data.access_token);
+  if (data.refresh_token) localStorage.setItem('spot_refresh', data.refresh_token);
+  localStorage.setItem('spot_expires', String(Date.now() + data.expires_in * 1000));
+
+  return data.access_token;
+}
+
+export async function refreshAccessToken(): Promise<string | null> {
+  const refreshToken = localStorage.getItem('spot_refresh');
+  if (!refreshToken) return null;
+
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: SPOTIFY_CLIENT_ID,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+    }),
+  });
+
+  const data = await res.json();
+  if (data.error) return null;
+
+  localStorage.setItem('spot_token', data.access_token);
+  localStorage.setItem('spot_expires', String(Date.now() + data.expires_in * 1000));
+  return data.access_token;
+}
+
+export function getStoredToken(): string | null {
+  const token = localStorage.getItem('spot_token');
+  const expires = parseInt(localStorage.getItem('spot_expires') ?? '0', 10);
+  if (!token || Date.now() > expires - 60_000) return null;
+  return token;
+}

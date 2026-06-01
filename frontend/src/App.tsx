@@ -10,6 +10,11 @@ import {
   SpotifyService,
   Track,
 } from './services/spotify';
+import {
+  exchangeCodeForToken,
+  getStoredToken,
+  redirectToSpotifyLogin,
+} from './services/auth';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -35,14 +40,6 @@ const SCREEN_TITLES: Record<Screen, string> = {
 
 // ── Helpers ────────────────────────────────────────────────
 
-function parseHash(): { accessToken: string | null; refreshToken: string | null; expiresIn: number } {
-  const params = new URLSearchParams(window.location.hash.slice(1));
-  return {
-    accessToken: params.get('access_token'),
-    refreshToken: params.get('refresh_token'),
-    expiresIn: parseInt(params.get('expires_in') ?? '3600', 10),
-  };
-}
 
 function visibleWindow<T>(items: T[], selectedIdx: number, windowSize = 7): [T[], number] {
   const half = Math.floor(windowSize / 2);
@@ -76,9 +73,7 @@ export default function App() {
   }, []);
 
   // Auth
-  const [accessToken, setAccessToken] = useState<string | null>(
-    () => localStorage.getItem('spot_token')
-  );
+  const [accessToken, setAccessToken] = useState<string | null>(getStoredToken);
   const [isDemoMode, setIsDemoMode] = useState(() => localStorage.getItem('demo_mode') === '1');
 
   // Service
@@ -113,19 +108,18 @@ export default function App() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Parse OAuth callback hash ────────────────────────────
+  // ── Handle PKCE callback (?code=...) ────────────────────
 
   useEffect(() => {
-    const { accessToken: tok, refreshToken, expiresIn } = parseHash();
-    if (tok) {
-      localStorage.setItem('spot_token', tok);
-      if (refreshToken) localStorage.setItem('spot_refresh', refreshToken);
-      localStorage.setItem('spot_expires', String(Date.now() + expiresIn * 1000));
-      window.history.replaceState(null, '', window.location.pathname);
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    if (!code) return;
+    window.history.replaceState(null, '', window.location.pathname);
+    exchangeCodeForToken(code).then((tok) => {
       setAccessToken(tok);
       setService(createSpotifyService(tok));
       setNav([{ screen: 'mainMenu', index: 0 }]);
-    }
+    }).catch(console.error);
   }, []);
 
   // ── SDK state sync (real mode) ───────────────────────────
@@ -263,7 +257,7 @@ export default function App() {
       switch (currentScreen) {
         case 'login': {
           if (idx === 0) {
-            window.location.href = 'http://localhost:3001/login';
+            redirectToSpotifyLogin();
           } else {
             localStorage.setItem('demo_mode', '1');
             setIsDemoMode(true);
