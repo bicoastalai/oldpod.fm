@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 
 interface Props {
   onScroll: (direction: 'up' | 'down') => void;
@@ -6,77 +6,124 @@ interface Props {
 }
 
 const ClickWheel: React.FC<Props> = ({ onScroll, onClick }) => {
-  const touchStartAngle = useRef<number | null>(null);
+  const wheelRef = useRef<HTMLDivElement>(null);
+  const touchAngleRef = useRef<number | null>(null);
+  const mouseAngleRef = useRef<number | null>(null);
+  const isDraggingRef = useRef(false);
 
-  const calculateAngle = (x: number, y: number) => {
-    const radians = Math.atan2(y, x);
-    const degrees = (radians * 180) / Math.PI;
-    return (degrees + 360) % 360;
+  const angle = (x: number, y: number) => {
+    const deg = (Math.atan2(y, x) * 180) / Math.PI;
+    return (deg + 360) % 360;
   };
 
-  const handleTouchStart = (event: React.TouchEvent) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const x = event.touches[0].clientX - (rect.left + rect.width / 2);
-    const y = event.touches[0].clientY - (rect.top + rect.height / 2);
-    touchStartAngle.current = calculateAngle(x, y);
+  const normDiff = (a: number, b: number) => {
+    let d = a - b;
+    if (d > 180) d -= 360;
+    if (d < -180) d += 360;
+    return d;
   };
 
-  const handleTouchMove = (event: React.TouchEvent) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const x = event.touches[0].clientX - (rect.left + rect.width / 2);
-    const y = event.touches[0].clientY - (rect.top + rect.height / 2);
+  // ── Touch ──────────────────────────────────────────────
+  const handleTouchStart = (e: React.TouchEvent) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    touchAngleRef.current = angle(e.touches[0].clientX - cx, e.touches[0].clientY - cy);
+  };
 
-    if (touchStartAngle.current !== null) {
-      const currentAngle = calculateAngle(x, y);
-      const diff = currentAngle - touchStartAngle.current;
-
-      if (Math.abs(diff) > 30) {
-        onScroll(diff > 0 ? 'down' : 'up');
-        touchStartAngle.current = currentAngle;
-      }
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (touchAngleRef.current === null) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const cur = angle(e.touches[0].clientX - cx, e.touches[0].clientY - cy);
+    const diff = normDiff(cur, touchAngleRef.current);
+    if (Math.abs(diff) > 20) {
+      onScroll(diff > 0 ? 'down' : 'up');
+      touchAngleRef.current = cur;
     }
   };
 
-  const handleClick = (button: 'menu' | 'next' | 'previous' | 'playPause' | 'select') => {
-    onClick(button);
+  const handleTouchEnd = () => {
+    touchAngleRef.current = null;
   };
 
+  // ── Mouse ──────────────────────────────────────────────
+  const handleMouseDown = (e: React.MouseEvent) => {
+    const rect = wheelRef.current!.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const dx = e.clientX - cx;
+    const dy = e.clientY - cy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    // Only start drag on the ring, not the center button (radius ~36px)
+    if (dist > 36) {
+      isDraggingRef.current = true;
+      mouseAngleRef.current = angle(dx, dy);
+    }
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDraggingRef.current || mouseAngleRef.current === null) return;
+      const rect = wheelRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const cur = angle(e.clientX - cx, e.clientY - cy);
+      const diff = normDiff(cur, mouseAngleRef.current);
+      if (Math.abs(diff) > 15) {
+        onScroll(diff > 0 ? 'down' : 'up');
+        mouseAngleRef.current = cur;
+      }
+    };
+
+    const handleMouseUp = () => {
+      isDraggingRef.current = false;
+      mouseAngleRef.current = null;
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [onScroll]);
+
   return (
-    <div
-      className="w-56 h-56 bg-gray-300 rounded-full relative"
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-    >
-      <button
-        className="absolute top-4 left-1/2 transform -translate-x-1/2"
-        onClick={() => handleClick('menu')}
+    <div className="click-wheel-wrap">
+      <div
+        ref={wheelRef}
+        className="click-wheel"
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onMouseDown={handleMouseDown}
       >
-        Menu
-      </button>
-      <button
-        className="absolute bottom-4 left-1/2 transform -translate-x-1/2"
-        onClick={() => handleClick('playPause')}
-      >
-        Play/Pause
-      </button>
-      <button
-        className="absolute left-4 top-1/2 transform -translate-y-1/2"
-        onClick={() => handleClick('previous')}
-      >
-        Previous
-      </button>
-      <button
-        className="absolute right-4 top-1/2 transform -translate-y-1/2"
-        onClick={() => handleClick('next')}
-      >
-        Next
-      </button>
-      <button
-        className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-gray-500 w-16 h-16 rounded-full"
-        onClick={() => handleClick('select')}
-      >
-        Select
-      </button>
+        {/* MENU */}
+        <button className="wheel-btn wheel-btn-menu" onClick={() => onClick('menu')}>
+          MENU
+        </button>
+
+        {/* ▶⏸ Play/Pause */}
+        <button className="wheel-btn wheel-btn-play" onClick={() => onClick('playPause')}>
+          ▶⏸
+        </button>
+
+        {/* ◀◀ Previous */}
+        <button className="wheel-btn wheel-btn-prev" onClick={() => onClick('previous')}>
+          ⏮
+        </button>
+
+        {/* ▶▶ Next */}
+        <button className="wheel-btn wheel-btn-next" onClick={() => onClick('next')}>
+          ⏭
+        </button>
+
+        {/* Center select */}
+        <button className="center-btn" onClick={() => onClick('select')} />
+      </div>
     </div>
   );
 };

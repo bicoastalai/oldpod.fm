@@ -4,8 +4,9 @@ const spotifyRouter = require('./routes/spotify');
 
 const app = express();
 
-app.use(cors());
-app.use('/spotify', spotifyRouter);
+app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }));
+app.use(express.json());
+app.use('/', spotifyRouter);
 
-const PORT = 3100;
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
