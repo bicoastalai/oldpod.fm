@@ -256,11 +256,63 @@ export default function App() {
     [volume, isDemoMode, service]
   );
 
+  // ── Select action (takes explicit index to avoid stale closure) ──
+
+  const doSelect = useCallback(
+    (idx: number) => {
+      switch (currentScreen) {
+        case 'login': {
+          if (idx === 0) {
+            window.location.href = 'http://localhost:3001/login';
+          } else {
+            localStorage.setItem('demo_mode', '1');
+            setIsDemoMode(true);
+            setService(createMockService());
+            setNav([{ screen: 'mainMenu', index: 0 }]);
+          }
+          break;
+        }
+        case 'mainMenu': {
+          if (idx === 0) push('music');
+          else if (idx === 1) push('nowPlaying');
+          else if (idx === 2) push('settings');
+          break;
+        }
+        case 'music': {
+          if (idx === 0) loadPlaylists().then(() => push('playlists'));
+          break;
+        }
+        case 'playlists': {
+          const pl = playlists[idx];
+          if (pl) loadTracks(pl).then(() => push('tracks'));
+          break;
+        }
+        case 'tracks': {
+          const track = tracks[idx];
+          if (track) playTrack(tracks, idx).then(() => push('nowPlaying'));
+          break;
+        }
+        case 'nowPlaying':
+          togglePlay();
+          break;
+      }
+    },
+    [currentScreen, push, playlists, tracks, loadPlaylists, loadTracks, playTrack, togglePlay]
+  );
+
+  // Clicking a list item: update selection + immediately act on it
+  const handleItemClick = useCallback(
+    (idx: number) => {
+      setIndex(idx);
+      doSelect(idx);
+    },
+    [setIndex, doSelect]
+  );
+
   // ── Click wheel handlers ──────────────────────────────────
 
   const handleScroll = useCallback(
     (direction: 'up' | 'down') => {
-      // clockwise (down) = volume up on now playing, else scroll down list
       if (currentScreen === 'nowPlaying') {
         adjustVolume(direction === 'down' ? 5 : -5);
         return;
@@ -275,82 +327,15 @@ export default function App() {
   const handleClick = useCallback(
     (button: 'menu' | 'next' | 'previous' | 'playPause' | 'select') => {
       switch (button) {
-        case 'menu':
-          pop();
-          break;
-        case 'playPause':
-          if (currentTrack) togglePlay();
-          break;
-        case 'next':
-          skipNext();
-          break;
-        case 'previous':
-          skipPrev();
-          break;
-        case 'select':
-          handleSelect();
-          break;
+        case 'menu': pop(); break;
+        case 'playPause': if (currentTrack) togglePlay(); break;
+        case 'next': skipNext(); break;
+        case 'previous': skipPrev(); break;
+        case 'select': doSelect(selectedIndex); break;
       }
     },
-    [currentScreen, selectedIndex, pop, togglePlay, skipNext, skipPrev] // eslint-disable-line react-hooks/exhaustive-deps
+    [selectedIndex, pop, togglePlay, skipNext, skipPrev, doSelect, currentTrack]
   );
-
-  // ── Select action per screen ──────────────────────────────
-
-  const handleSelect = useCallback(() => {
-    switch (currentScreen) {
-      case 'login': {
-        if (selectedIndex === 0) {
-          window.location.href = 'http://localhost:3001/login';
-        } else {
-          localStorage.setItem('demo_mode', '1');
-          setIsDemoMode(true);
-          setService(createMockService());
-          setNav([{ screen: 'mainMenu', index: 0 }]);
-        }
-        break;
-      }
-      case 'mainMenu': {
-        if (selectedIndex === 0) push('music');
-        else if (selectedIndex === 1) push('nowPlaying');
-        else if (selectedIndex === 2) push('settings');
-        break;
-      }
-      case 'music': {
-        if (selectedIndex === 0) {
-          loadPlaylists().then(() => push('playlists'));
-        }
-        break;
-      }
-      case 'playlists': {
-        const pl = playlists[selectedIndex];
-        if (pl) {
-          loadTracks(pl).then(() => push('tracks'));
-        }
-        break;
-      }
-      case 'tracks': {
-        const track = tracks[selectedIndex];
-        if (track) {
-          playTrack(tracks, selectedIndex).then(() => push('nowPlaying'));
-        }
-        break;
-      }
-      case 'nowPlaying':
-        togglePlay();
-        break;
-    }
-  }, [
-    currentScreen,
-    selectedIndex,
-    push,
-    playlists,
-    tracks,
-    loadPlaylists,
-    loadTracks,
-    playTrack,
-    togglePlay,
-  ]);
 
   function getListLength(screen: Screen): number {
     switch (screen) {
@@ -403,6 +388,7 @@ export default function App() {
                   isPlaying={isPlaying}
                   positionMs={positionMs}
                   volume={volume}
+                  onItemClick={handleItemClick}
                 />
               )}
             </div>
@@ -429,19 +415,21 @@ interface ScreenProps {
   isPlaying: boolean;
   positionMs: number;
   volume: number;
+  onItemClick: (index: number) => void;
 }
 
 function ScreenContent(props: ScreenProps) {
-  const { screen, selectedIndex } = props;
+  const { screen, selectedIndex, onItemClick } = props;
 
   switch (screen) {
     case 'login':
-      return <LoginScreen selectedIndex={selectedIndex} />;
+      return <LoginScreen selectedIndex={selectedIndex} onItemClick={onItemClick} />;
     case 'mainMenu':
       return (
         <MenuScreen
           items={props.mainMenu.map((label) => ({ label, arrow: true }))}
           selectedIndex={selectedIndex}
+          onItemClick={onItemClick}
         />
       );
     case 'music':
@@ -449,6 +437,7 @@ function ScreenContent(props: ScreenProps) {
         <MenuScreen
           items={props.musicMenu.map((label) => ({ label, arrow: true }))}
           selectedIndex={selectedIndex}
+          onItemClick={onItemClick}
         />
       );
     case 'playlists':
@@ -460,6 +449,7 @@ function ScreenContent(props: ScreenProps) {
             arrow: true,
           }))}
           selectedIndex={selectedIndex}
+          onItemClick={onItemClick}
         />
       );
     case 'tracks':
@@ -470,6 +460,7 @@ function ScreenContent(props: ScreenProps) {
             detail: t.artist,
           }))}
           selectedIndex={selectedIndex}
+          onItemClick={onItemClick}
         />
       );
     case 'nowPlaying':
@@ -490,16 +481,20 @@ function ScreenContent(props: ScreenProps) {
 
 // ── Login screen ───────────────────────────────────────────
 
-function LoginScreen({ selectedIndex }: { selectedIndex: number }) {
+function LoginScreen({ selectedIndex, onItemClick }: { selectedIndex: number; onItemClick: (i: number) => void }) {
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div className="login-screen" style={{ flex: 1 }}>
         <div className="login-logo">🎵 OldPod.fm</div>
-        <div className="login-sub">Use ↻ wheel to select, center to confirm</div>
       </div>
       <ul className="menu-list">
         {['Login with Spotify', 'Demo Mode'].map((label, i) => (
-          <li key={label} className={`menu-item${i === selectedIndex ? ' selected' : ''}`}>
+          <li
+            key={label}
+            className={`menu-item${i === selectedIndex ? ' selected' : ''}`}
+            onClick={() => onItemClick(i)}
+            style={{ cursor: 'pointer' }}
+          >
             <span className="menu-item-text">{label}</span>
           </li>
         ))}
@@ -516,13 +511,19 @@ interface MenuItem {
   arrow?: boolean;
 }
 
-function MenuScreen({ items, selectedIndex }: { items: MenuItem[]; selectedIndex: number }) {
+function MenuScreen({ items, selectedIndex, onItemClick }: { items: MenuItem[]; selectedIndex: number; onItemClick: (i: number) => void }) {
   const [visible, localSelected] = visibleWindow(items, selectedIndex);
+  const startOffset = selectedIndex - localSelected;
 
   return (
     <ul className="menu-list" style={{ height: '100%' }}>
       {visible.map((item, i) => (
-        <li key={i} className={`menu-item${i === localSelected ? ' selected' : ''}`}>
+        <li
+          key={i}
+          className={`menu-item${i === localSelected ? ' selected' : ''}`}
+          onClick={() => onItemClick(startOffset + i)}
+          style={{ cursor: 'pointer' }}
+        >
           <span className="menu-item-text">{item.label}</span>
           {item.detail && (
             <span style={{ fontSize: '9px', opacity: 0.6, marginRight: '4px', flexShrink: 0 }}>
