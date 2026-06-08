@@ -7,122 +7,135 @@ interface Props {
 
 const ClickWheel: React.FC<Props> = ({ onScroll, onClick }) => {
   const wheelRef = useRef<HTMLDivElement>(null);
-  const touchAngleRef = useRef<number | null>(null);
-  const mouseAngleRef = useRef<number | null>(null);
-  const isDraggingRef = useRef(false);
 
-  const angle = (x: number, y: number) => {
-    const deg = (Math.atan2(y, x) * 180) / Math.PI;
-    return (deg + 360) % 360;
-  };
-
-  const normDiff = (a: number, b: number) => {
-    let d = a - b;
-    if (d > 180) d -= 360;
-    if (d < -180) d += 360;
-    return d;
-  };
-
-  // ── Touch ──────────────────────────────────────────────
-  const handleTouchStart = (e: React.TouchEvent) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    touchAngleRef.current = angle(e.touches[0].clientX - cx, e.touches[0].clientY - cy);
-  };
-
-  const handleTouchMove = (e: React.TouchEvent) => {
-    if (touchAngleRef.current === null) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const cur = angle(e.touches[0].clientX - cx, e.touches[0].clientY - cy);
-    const diff = normDiff(cur, touchAngleRef.current);
-    if (Math.abs(diff) > 20) {
-      onScroll(diff > 0 ? 'down' : 'up');
-      touchAngleRef.current = cur;
-    }
-  };
-
-  const handleTouchEnd = () => {
-    touchAngleRef.current = null;
-  };
-
-  // ── Mouse ──────────────────────────────────────────────
-  const handleMouseDown = (e: React.MouseEvent) => {
-    const rect = wheelRef.current!.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const dx = e.clientX - cx;
-    const dy = e.clientY - cy;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    // Only start drag on the ring, not the center button (radius ~36px)
-    if (dist > 36) {
-      isDraggingRef.current = true;
-      mouseAngleRef.current = angle(dx, dy);
-    }
-  };
+  // Keep the latest callbacks in refs so the long-lived pointer listeners never
+  // capture a stale closure and never need to be torn down / re-added.
+  const onScrollRef = useRef(onScroll);
+  const onClickRef = useRef(onClick);
+  useEffect(() => {
+    onScrollRef.current = onScroll;
+    onClickRef.current = onClick;
+  });
 
   useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isDraggingRef.current || mouseAngleRef.current === null) return;
-      const rect = wheelRef.current?.getBoundingClientRect();
-      if (!rect) return;
+    const wheel = wheelRef.current;
+    if (!wheel) return;
+
+    let lastAngle: number | null = null;
+    let activePointer: number | null = null;
+    // Accumulate small movements so slow drags still register a step.
+    let residual = 0;
+    const STEP_DEG = 18;
+
+    const angleAt = (clientX: number, clientY: number) => {
+      const rect = wheel.getBoundingClientRect();
       const cx = rect.left + rect.width / 2;
       const cy = rect.top + rect.height / 2;
-      const cur = angle(e.clientX - cx, e.clientY - cy);
-      const diff = normDiff(cur, mouseAngleRef.current);
-      if (Math.abs(diff) > 15) {
-        onScroll(diff > 0 ? 'down' : 'up');
-        mouseAngleRef.current = cur;
+      const deg = (Math.atan2(clientY - cy, clientX - cx) * 180) / Math.PI;
+      return (deg + 360) % 360;
+    };
+
+    const radiusAt = (clientX: number, clientY: number) => {
+      const rect = wheel.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const dx = clientX - cx;
+      const dy = clientY - cy;
+      // Normalise against the rendered radius (handles CSS scaling on mobile).
+      return Math.sqrt(dx * dx + dy * dy) / (rect.width / 2);
+    };
+
+    const normDiff = (a: number, b: number) => {
+      let d = a - b;
+      if (d > 180) d -= 360;
+      if (d < -180) d += 360;
+      return d;
+    };
+
+    const onPointerDown = (e: PointerEvent) => {
+      // Only the ring background starts a scroll. Presses on a wheel button
+      // (MENU/play/prev/next/center) must fall through to their click handlers.
+      if (e.target !== wheel) return;
+      // Belt-and-suspenders: ignore the very center of the ring.
+      if (radiusAt(e.clientX, e.clientY) < 0.36) return;
+      activePointer = e.pointerId;
+      lastAngle = angleAt(e.clientX, e.clientY);
+      residual = 0;
+      try {
+        wheel.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
       }
     };
 
-    const handleMouseUp = () => {
-      isDraggingRef.current = false;
-      mouseAngleRef.current = null;
+    const onPointerMove = (e: PointerEvent) => {
+      if (activePointer !== e.pointerId || lastAngle === null) return;
+      const cur = angleAt(e.clientX, e.clientY);
+      residual += normDiff(cur, lastAngle);
+      lastAngle = cur;
+      while (Math.abs(residual) >= STEP_DEG) {
+        const dir = residual > 0 ? 'down' : 'up';
+        residual -= residual > 0 ? STEP_DEG : -STEP_DEG;
+        onScrollRef.current(dir);
+      }
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
+    const endPointer = (e: PointerEvent) => {
+      if (activePointer !== e.pointerId) return;
+      activePointer = null;
+      lastAngle = null;
+      residual = 0;
+      try {
+        wheel.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
     };
-  }, [onScroll]);
+
+    wheel.addEventListener('pointerdown', onPointerDown);
+    wheel.addEventListener('pointermove', onPointerMove);
+    wheel.addEventListener('pointerup', endPointer);
+    wheel.addEventListener('pointercancel', endPointer);
+    return () => {
+      wheel.removeEventListener('pointerdown', onPointerDown);
+      wheel.removeEventListener('pointermove', onPointerMove);
+      wheel.removeEventListener('pointerup', endPointer);
+      wheel.removeEventListener('pointercancel', endPointer);
+    };
+  }, []);
 
   return (
     <div className="click-wheel-wrap">
-      <div
-        ref={wheelRef}
-        className="click-wheel"
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        onMouseDown={handleMouseDown}
-      >
-        {/* MENU */}
-        <button className="wheel-btn wheel-btn-menu" onClick={() => onClick('menu')}>
+      <div ref={wheelRef} className="click-wheel">
+        <button
+          className="wheel-btn wheel-btn-menu"
+          onClick={() => onClickRef.current('menu')}
+        >
           MENU
         </button>
 
-        {/* ▶⏸ Play/Pause */}
-        <button className="wheel-btn wheel-btn-play" onClick={() => onClick('playPause')}>
+        <button
+          className="wheel-btn wheel-btn-play"
+          onClick={() => onClickRef.current('playPause')}
+        >
           ▶⏸
         </button>
 
-        {/* ◀◀ Previous */}
-        <button className="wheel-btn wheel-btn-prev" onClick={() => onClick('previous')}>
+        <button
+          className="wheel-btn wheel-btn-prev"
+          onClick={() => onClickRef.current('previous')}
+        >
           ⏮
         </button>
 
-        {/* ▶▶ Next */}
-        <button className="wheel-btn wheel-btn-next" onClick={() => onClick('next')}>
+        <button
+          className="wheel-btn wheel-btn-next"
+          onClick={() => onClickRef.current('next')}
+        >
           ⏭
         </button>
 
-        {/* Center select */}
-        <button className="center-btn" onClick={() => onClick('select')} />
+        <button className="center-btn" onClick={() => onClickRef.current('select')} />
       </div>
     </div>
   );

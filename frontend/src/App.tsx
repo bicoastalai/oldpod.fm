@@ -113,6 +113,18 @@ export default function App() {
     );
   }, []);
 
+  // Relative move with clamping via a functional update, so rapid wheel ticks
+  // in one frame accumulate instead of collapsing to a single step.
+  const moveSelection = useCallback((delta: number, listLen: number) => {
+    setNav((prev) =>
+      prev.map((e, i) =>
+        i === prev.length - 1
+          ? { ...e, index: Math.max(0, Math.min(listLen - 1, e.index + delta)) }
+          : e
+      )
+    );
+  }, []);
+
   // Auth
   const [accessToken, setAccessToken] = useState<string | null>(getStoredToken);
   const [isDemoMode, setIsDemoMode] = useState(() => {
@@ -158,6 +170,17 @@ export default function App() {
   const [positionMs, setPositionMs] = useState(0);
   const [volume, setVolume] = useState(80);
   const playingTracksRef = useRef<Track[]>([]);
+
+  // Seek/scrub bookkeeping. positionRef avoids stale reads while spinning the
+  // wheel; scrubbingUntilRef briefly suppresses SDK position echoes so the bar
+  // doesn't jump backwards mid-scrub.
+  const positionRef = useRef(0);
+  const scrubbingUntilRef = useRef(0);
+  const seekTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    positionRef.current = positionMs;
+  }, [positionMs]);
 
   // Spotify SDK player (real mode)
   const {
@@ -229,7 +252,8 @@ export default function App() {
   useEffect(() => {
     if (!sdkState || isDemoMode) return;
     setIsPlaying(sdkState.isPlaying);
-    setPositionMs(sdkState.positionMs);
+    // Don't clobber the user's scrub position with an in-flight SDK echo.
+    if (Date.now() >= scrubbingUntilRef.current) setPositionMs(sdkState.positionMs);
     if (sdkState.track) setCurrentTrack(sdkState.track);
   }, [sdkState, isDemoMode]);
 
@@ -489,6 +513,33 @@ export default function App() {
     [volume, isDemoMode, service, deviceId, setPlayerVolume]
   );
 
+  // Scrub the current track. Each wheel tick nudges the position; the real
+  // seek is debounced so spinning doesn't spam the API.
+  const SEEK_STEP_MS = 5000;
+  const seekBy = useCallback(
+    (deltaMs: number) => {
+      const track = currentTrack;
+      if (!track) return;
+      const target = Math.max(0, Math.min(track.durationMs, positionRef.current + deltaMs));
+      positionRef.current = target;
+      setPositionMs(target);
+      scrubbingUntilRef.current = Date.now() + 900;
+      if (isDemoMode || !service) return;
+      if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
+      seekTimerRef.current = window.setTimeout(() => {
+        void (async () => {
+          try {
+            await activatePlayback();
+            await runWithDevice((id) => service.seek(target, id));
+          } catch {
+            /* keep optimistic UI */
+          }
+        })();
+      }, 250);
+    },
+    [currentTrack, isDemoMode, service, activatePlayback, runWithDevice]
+  );
+
   // ── Settings toggles ─────────────────────────────────────
 
   const toggleShuffle = useCallback(() => {
@@ -660,22 +711,25 @@ export default function App() {
   const handleScroll = useCallback(
     (direction: 'up' | 'down') => {
       if (currentScreen === 'nowPlaying') {
-        adjustVolume(direction === 'down' ? 5 : -5);
+        // Clockwise (down) scrubs forward, counter-clockwise rewinds.
+        seekBy(direction === 'down' ? SEEK_STEP_MS : -SEEK_STEP_MS);
         return;
       }
       if (currentScreen === 'lyrics') {
         const listLen = lyrics?.lines.length ?? 0;
         if (listLen === 0) return;
         setLyricsUserScrolled(true);
-        const delta = direction === 'down' ? 1 : -1;
-        setIndex(Math.max(0, Math.min(listLen - 1, selectedIndex + delta)));
+        moveSelection(direction === 'down' ? 1 : -1, listLen);
         return;
       }
-      const listLen = getListLength(currentScreen);
-      const delta = direction === 'down' ? 1 : -1;
-      setIndex(Math.max(0, Math.min(listLen - 1, selectedIndex + delta)));
+      moveSelection(direction === 'down' ? 1 : -1, getListLength(currentScreen));
     },
-    [currentScreen, selectedIndex, adjustVolume, setIndex, lyrics] // eslint-disable-line react-hooks/exhaustive-deps
+    // playlists/albums/tracks/trackSource are read via getListLength — they must
+    // be deps so the wheel sees freshly-loaded lists (else it clamps to length 0).
+    [
+      currentScreen, seekBy, moveSelection, lyrics,
+      playlists, albums, tracks, trackSource,
+    ]
   );
 
   const handleClick = useCallback(
@@ -1138,7 +1192,7 @@ function NowPlayingScreen({
         <div className="np-hint np-hint--error">{playerError}</div>
       ) : (
         <div className="np-hint">
-          {!isPlayerReady ? 'Play a song to connect audio' : 'Center · Lyrics'}
+          {!isPlayerReady ? 'Play a song to connect audio' : 'Wheel · Seek   Center · Lyrics'}
         </div>
       )}
     </div>
