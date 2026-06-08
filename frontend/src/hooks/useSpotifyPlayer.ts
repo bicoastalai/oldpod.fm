@@ -232,11 +232,19 @@ export function useSpotifyPlayer(accessToken: string | null) {
   );
 
   const activatePlayback = useCallback(async () => {
-    await ensurePlayer();
-    const player = playerRef.current ?? singletonPlayer;
-    if (player?.activateElement) {
-      await player.activateElement();
+    // Unlock the audio element synchronously inside the user gesture FIRST.
+    // iOS/Safari (and Chrome autoplay rules) require activateElement() to run
+    // within the click; awaiting a network connect beforehand loses the gesture
+    // and playback silently reverts to pause after transfer.
+    const existing = playerRef.current ?? singletonPlayer;
+    if (existing?.activateElement) {
+      try {
+        await existing.activateElement();
+      } catch {
+        /* ignore — best effort */
+      }
     }
+    await ensurePlayer();
   }, [ensurePlayer]);
 
   const setPlayerVolume = useCallback((volumePct: number) => {
@@ -245,6 +253,14 @@ export function useSpotifyPlayer(accessToken: string | null) {
       player.setVolume(Math.max(0, Math.min(1, volumePct / 100)));
     }
   }, []);
+
+  // Connect the player as soon as we have a token so the device is registered
+  // and `activateElement()` can run within the first play gesture (see above).
+  useEffect(() => {
+    if (accessToken && !deviceId) {
+      void ensurePlayer();
+    }
+  }, [accessToken, deviceId, ensurePlayer]);
 
   useEffect(() => {
     if (!accessToken) {
