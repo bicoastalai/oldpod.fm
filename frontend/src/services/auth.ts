@@ -1,6 +1,21 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const SPOTIFY_CLIENT_ID = (import.meta as any).env.VITE_SPOTIFY_CLIENT_ID as string;
-const REDIRECT_URI = window.location.origin;
+
+/** Redirect URI sent to Spotify — must match the dashboard entry character-for-character. */
+export function getSpotifyRedirectUri(): string {
+  const fromEnv = (import.meta as any).env.VITE_SPOTIFY_REDIRECT_URI as string | undefined;
+  const raw = fromEnv?.trim() || window.location.origin;
+  return raw.replace(/\/$/, '');
+}
+
+/** Shown on login when the user opened the app on a host Spotify will reject. */
+export function getRedirectUriWarning(): string | null {
+  const host = window.location.hostname;
+  if (host === 'localhost') {
+    return 'Use http://127.0.0.1:5173 — Spotify does not allow http://localhost redirect URIs.';
+  }
+  return null;
+}
 
 const SCOPES = [
   'streaming',
@@ -32,6 +47,8 @@ async function sha256(plain: string): Promise<Uint8Array> {
 }
 
 export async function redirectToSpotifyLogin() {
+  localStorage.removeItem('demo_mode');
+
   const verifier = base64url(randomBytes(32));
   const challenge = base64url(await sha256(verifier));
 
@@ -40,7 +57,7 @@ export async function redirectToSpotifyLogin() {
   const params = new URLSearchParams({
     client_id: SPOTIFY_CLIENT_ID,
     response_type: 'code',
-    redirect_uri: REDIRECT_URI,
+    redirect_uri: getSpotifyRedirectUri(),
     scope: SCOPES,
     code_challenge_method: 'S256',
     code_challenge: challenge,
@@ -60,7 +77,7 @@ export async function exchangeCodeForToken(code: string): Promise<string> {
       client_id: SPOTIFY_CLIENT_ID,
       grant_type: 'authorization_code',
       code,
-      redirect_uri: REDIRECT_URI,
+      redirect_uri: getSpotifyRedirectUri(),
       code_verifier: verifier,
     }),
   });

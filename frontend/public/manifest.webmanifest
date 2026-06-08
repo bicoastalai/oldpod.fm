@@ -1,0 +1,19 @@
+{
+  "name": "OldPod.fm",
+  "short_name": "OldPod",
+  "description": "A classic iPod interface powered by Spotify.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#909090",
+  "theme_color": "#1a55b0",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

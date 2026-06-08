@@ -1,56 +1,53 @@
-# # OldPod.fm
+# OldPod.fm
 
-A classic iPod interface powered by Spotify. Built with React, TypeScript, and the Spotify Web Playback SDK.
+A classic iPod interface powered by Spotify. Built with React, TypeScript, Vite, and the Spotify Web Playback SDK.
 
------
+---
 
 ## What It Is
 
-OldPod.fm recreates the 5th generation iPod experience in the browser. Click wheel navigation, retro LCD screen, album art, and full playback control, all wired to your Spotify account.
+OldPod.fm recreates the 5th generation iPod experience in the browser. Click wheel navigation, retro LCD screen, album art, and full playback control, all wired to your Spotify account. There's also a **Demo Mode** so you can explore the whole interface without a Spotify account.
 
------
+It's a **frontend-only** app: authentication uses Spotify's PKCE flow directly from the browser, so there is no backend and no client secret to manage.
+
+---
 
 ## Features
 
-- Authentic 5th gen iPod UI with white body and color LCD screen
-- Functional click wheel with circular gesture detection
-- Five-zone click wheel: Menu, Play/Pause, Next, Previous, Select
-- iPod-style menu navigation: Music, Now Playing, Settings
-- Retro LCD font on the screen
-- Now Playing view: album art, track name, artist, progress bar
-- Spotify playlist browsing via the Music menu
-- Full playback control: play, pause, skip, seek, volume
-- Spotify OAuth login on load
+- **iPod Classic** black aluminum skin (default) or original white 5th-gen look
+- Functional click wheel with circular gesture detection (drag to scroll)
+- Five-zone controls: Menu, Play/Pause, Next, Previous, Select
+- iPod-style menu navigation
+- **Music browsing**: Playlists, Albums, and Recently Played
+- **Search** composed via the click wheel (on-screen keypad)
+- **Now Playing**: album art (from Spotify), track info, progress bar, volume, shuffle/repeat indicators
+- **Lyrics**: synced/plain lyrics via [LRCLib](https://lrclib.net) — press center on Now Playing
+- **Shuffle and Repeat** (Off / All / One) controls in Settings
+- **Themes**: iPod Classic black (default) or white 5th-gen — Settings → Theme
+- **PWA**: installable to your home screen, works offline for the app shell
+- **Demo Mode**: a built-in mock catalog — no login required
+- Spotify login via PKCE (no client secret, no backend)
 
------
+---
 
 ## Tech Stack
 
-**Frontend**
-
-- React with TypeScript
+- React + TypeScript
 - Vite
 - Tailwind CSS
+- Spotify Web Playback SDK + Spotify Web API
 
-**Backend**
-
-- Node.js with Express
-- Spotify OAuth token exchange
-
-**External**
-
-- Spotify Web Playback SDK
-- Spotify Web API
-
------
+---
 
 ## Requirements
 
-- Spotify Premium account (required by the Web Playback SDK)
-- Spotify Developer app credentials
+- **Spotify Premium** account (required by the Web Playback SDK for real playback)
+- A Spotify Developer app (Client ID only — no secret needed)
 - Node.js 18+
 
------
+> No Premium account? Use **Demo Mode** from the login screen to explore the full UI with mock data.
+
+---
 
 ## Setup
 
@@ -63,93 +60,168 @@ cd oldpod.fm
 
 ### 2. Install dependencies
 
+The app lives in `frontend/`:
+
 ```bash
+cd frontend
 npm install
 ```
 
-### 3. Set up Spotify credentials
+(Or from the repo root: `npm run install:all`.)
 
-Go to [developer.spotify.com](https://developer.spotify.com), create an app, and grab your Client ID and Client Secret.
+### 3. Create a Spotify app
 
-Set your redirect URI to:
+Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), create an app, and copy its **Client ID**. You do **not** need the client secret.
 
-```
-http://localhost:3001/callback
-```
-
-### 4. Create environment variables
-
-Create a `.env` file in the root:
+In the app's **Redirect URIs**, add this exact value:
 
 ```
-SPOTIFY_CLIENT_ID=your_client_id_here
-SPOTIFY_CLIENT_SECRET=your_client_secret_here
-SPOTIFY_REDIRECT_URI=http://localhost:3001/callback
+http://127.0.0.1:5173
 ```
 
-### 5. Run the backend
+> **Use `127.0.0.1`, not `localhost`.** Spotify's redirect-URI policy allows plain
+> `http` only on loopback IP addresses (`127.0.0.1`), and browsers treat
+> `127.0.0.1` as a secure context, which the Web Playback SDK requires. This is
+> why no HTTPS/self-signed certificate is needed in development.
 
-```bash
-npm run server
+### 4. Add your Client ID
+
+Create `frontend/.env` (you can copy `frontend/.env.example`):
+
+```
+VITE_SPOTIFY_CLIENT_ID=your_spotify_client_id_here
 ```
 
-Backend runs on port 3001.
-
-### 6. Run the frontend
+### 5. Run the dev server
 
 ```bash
 npm run dev
 ```
 
-Frontend runs on port 5173. Open <http://localhost:5173>.
+Open **http://127.0.0.1:5173**. The port is fixed (`strictPort`) so it always
+matches your registered redirect URI.
 
------
+---
 
 ## How It Works
 
-1. Open the app in your browser
-1. Log in with your Spotify account
-1. Browse your playlists using the click wheel
-1. Select a playlist and start listening
-1. Control playback from the Now Playing screen
+1. Open the app at `http://127.0.0.1:5173`.
+2. Choose **Login with Spotify** (PKCE flow) or **Demo Mode**.
+3. Browse **Music → Playlists / Albums / Recently Played**, or use **Search**.
+4. Select a track to start playback and land on **Now Playing**.
+5. Press **center** on Now Playing (or select) to open **Lyrics** — lines highlight in sync when available.
+6. Toggle **Shuffle**, **Repeat**, and the **Theme** in **Settings**.
 
-**Click wheel controls**
+### Click wheel controls
 
-- Rotate clockwise: scroll down / volume up
-- Rotate counterclockwise: scroll up / volume down
-- Menu button: go back
-- Center button: select
-- Play/Pause: play or pause
-- Next/Previous: skip tracks
+- Drag clockwise: scroll down (volume up on Now Playing)
+- Drag counterclockwise: scroll up (volume down on Now Playing)
+- **Menu**: go back
+- **Center**: select; on Now Playing opens **Lyrics**
+- **Play/Pause**: toggle playback
+- **Next / Previous**: skip tracks
 
------
+You can also click list items and on-screen keys directly with the mouse.
 
-## Deployment
+---
 
-**Frontend:** Deploy to Vercel. Set environment variables in the Vercel dashboard.
+## Available Scripts
 
-**Backend:** Deploy to Railway. Add your environment variables in the Railway project settings. Update your Spotify redirect URI to match the Railway URL.
+Run from `frontend/` (or use the matching root script):
 
-Update SPOTIFY_REDIRECT_URI in both your .env and your Spotify Developer dashboard when deploying.
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Start the Vite dev server on `http://127.0.0.1:5173` |
+| `npm run build` | Production build to `dist/` |
+| `npm run preview` | Preview the production build locally |
 
------
+---
+
+## Deployment (oldpod.online + Namecheap)
+
+The app is a static Vite build. **Vercel** is the simplest path to HTTPS for
+`oldpod.online`.
+
+### 1. Deploy on Vercel
+
+1. Push this repo to GitHub (if it is not already).
+2. [vercel.com](https://vercel.com) → **Add New Project** → import the repo.
+3. **Root Directory:** `frontend` (click Edit, set to `frontend`).
+4. Framework preset: **Vite** (defaults are fine: `npm run build`, output `dist`).
+5. **Environment variables** (Production):
+   - `VITE_SPOTIFY_CLIENT_ID` = your Spotify Client ID
+   - Do **not** set `VITE_SPOTIFY_REDIRECT_URI` — production uses the page origin.
+6. Deploy. You will get a `*.vercel.app` URL; confirm the app loads there first.
+
+### 2. Attach oldpod.online in Vercel
+
+1. Vercel project → **Settings → Domains**.
+2. Add `oldpod.online` and `www.oldpod.online`.
+3. Vercel shows the DNS records to create. For Namecheap, they are usually:
+
+| Type | Host | Value |
+| --- | --- | --- |
+| **A Record** | `@` | `76.76.21.21` |
+| **CNAME Record** | `www` | `cname.vercel-dns.com` |
+
+Use the exact values Vercel displays if they differ.
+
+### 3. Namecheap Advanced DNS
+
+1. [Namecheap](https://www.namecheap.com) → **Domain List** → **oldpod.online** → **Manage** → **Advanced DNS**.
+2. **Delete** the parking record if present:
+   - `CNAME` · `www` · `parkingpage.namecheap.com`
+3. **Add** the A and CNAME records from Vercel (table above).
+4. Leave unrelated records (e.g. SPF `TXT` for email) unless they conflict.
+5. Wait 5–60 minutes for DNS to propagate. Vercel will show **Valid** when ready.
+
+Optional: in Vercel, set `www.oldpod.online` to redirect to `oldpod.online` so
+you only need one Spotify redirect URI.
+
+### 4. Spotify Developer Dashboard
+
+[developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) → your app → **Settings** → **Redirect URIs**:
+
+```
+https://oldpod.online
+http://127.0.0.1:5173
+```
+
+Add `https://www.oldpod.online` only if you use `www` without redirecting to apex.
+
+Your Spotify user must still be listed under **User Management** (Development Mode).
+
+### 5. Test
+
+1. Open `https://oldpod.online` on your phone.
+2. Login screen should show redirect URI `https://oldpod.online`.
+3. **Connect with Spotify** → browse playlists → play a track.
+
+> **Note:** Web Playback works best in desktop Chrome. iPhone Safari may log in
+> but fail to play audio — that is a platform limitation, not a DNS issue.
+
+---
 
 ## Roadmap
 
-- [ ] PWA support for home screen install
-- [ ] Shuffle and repeat controls
-- [ ] Search via click wheel
-- [ ] Album browsing
-- [ ] Dark mode / classic black iPod skin
-- [ ] Recently played history
+- [x] Shuffle and repeat controls
+- [x] Search via click wheel
+- [x] Album browsing
+- [x] Recently played history
+- [x] Dark mode / classic black iPod skin
+- [x] PWA support for home screen install
+- [x] Synced lyrics (LRCLib) on Now Playing
+- [ ] Artist browsing
+- [ ] Cover Flow album view
+- [ ] Genius-style on-the-go playlists
 
------
+---
 
 ## Legal
 
-OldPod.fm is an independent project and is not affiliated with Apple or Spotify. iPod is a trademark of Apple Inc. This project does not use Apple’s trademarks or intellectual property. Spotify playback is handled entirely through the official Spotify Web Playback SDK under Spotify’s developer terms.
+OldPod.fm is an independent project and is not affiliated with Apple or Spotify. iPod is a trademark of Apple Inc. This project does not use Apple's trademarks or intellectual property. Spotify playback is handled entirely through the official Spotify Web Playback SDK under Spotify's developer terms.
 
------
+---
 
 ## License
 

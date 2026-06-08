@@ -14,16 +14,40 @@ export interface Playlist {
   trackCount: number;
 }
 
+export interface Album {
+  id: string;
+  uri: string;
+  name: string;
+  artist: string;
+  albumArt: string | null;
+  trackCount: number;
+}
+
+export type RepeatMode = 'off' | 'context' | 'track';
+
+/**
+ * Describes where playback should start. Playlists and albums play through a
+ * Spotify "context" (so the queue extends beyond the loaded page), while ad-hoc
+ * lists (search results, recently played) play from an explicit set of URIs.
+ */
+export type PlaySource = { contextUri: string } | { uris: string[] };
+
 export interface SpotifyService {
   getPlaylists(): Promise<Playlist[]>;
   getTracks(playlistId: string): Promise<Track[]>;
-  playTrack(playlistId: string, trackIndex: number, deviceId: string): Promise<void>;
+  getAlbums(): Promise<Album[]>;
+  getAlbumTracks(album: Album): Promise<Track[]>;
+  getRecentlyPlayed(): Promise<Track[]>;
+  search(query: string): Promise<Track[]>;
+  play(source: PlaySource, trackIndex: number, deviceId: string): Promise<void>;
   pause(deviceId: string): Promise<void>;
   resume(deviceId: string): Promise<void>;
   next(deviceId: string): Promise<void>;
   previous(deviceId: string): Promise<void>;
   seek(positionMs: number, deviceId: string): Promise<void>;
-  setVolume(volumePct: number): Promise<void>;
+  setVolume(volumePct: number, deviceId: string): Promise<void>;
+  setShuffle(state: boolean, deviceId: string): Promise<void>;
+  setRepeat(mode: RepeatMode, deviceId: string): Promise<void>;
 }
 
 // ── Mock data ──────────────────────────────────────────────
@@ -73,6 +97,39 @@ const MOCK_PLAYLISTS: Playlist[] = [
   { id: 'late', name: 'Late Night', trackCount: MOCK_TRACKS.late.length },
 ];
 
+const MOCK_ALBUM_TRACKS: Record<string, Track[]> = {
+  thriller: [
+    { id: 'a1', uri: 'mock:a1', name: "Wanna Be Startin' Somethin'", artist: 'Michael Jackson', album: 'Thriller', albumArt: null, durationMs: 363000 },
+    { id: 'a2', uri: 'mock:a2', name: 'Thriller', artist: 'Michael Jackson', album: 'Thriller', albumArt: null, durationMs: 358000 },
+    { id: 'a3', uri: 'mock:a3', name: 'Beat It', artist: 'Michael Jackson', album: 'Thriller', albumArt: null, durationMs: 258000 },
+    { id: 'a4', uri: 'mock:a4', name: 'Billie Jean', artist: 'Michael Jackson', album: 'Thriller', albumArt: null, durationMs: 294000 },
+  ],
+  rumours: [
+    { id: 'b1', uri: 'mock:b1', name: 'Second Hand News', artist: 'Fleetwood Mac', album: 'Rumours', albumArt: null, durationMs: 173000 },
+    { id: 'b2', uri: 'mock:b2', name: 'Dreams', artist: 'Fleetwood Mac', album: 'Rumours', albumArt: null, durationMs: 257000 },
+    { id: 'b3', uri: 'mock:b3', name: 'Go Your Own Way', artist: 'Fleetwood Mac', album: 'Rumours', albumArt: null, durationMs: 218000 },
+    { id: 'b4', uri: 'mock:b4', name: 'The Chain', artist: 'Fleetwood Mac', album: 'Rumours', albumArt: null, durationMs: 270000 },
+  ],
+  abbeyroad: [
+    { id: 'c1', uri: 'mock:c1', name: 'Come Together', artist: 'The Beatles', album: 'Abbey Road', albumArt: null, durationMs: 259000 },
+    { id: 'c2', uri: 'mock:c2', name: 'Something', artist: 'The Beatles', album: 'Abbey Road', albumArt: null, durationMs: 182000 },
+    { id: 'c3', uri: 'mock:c3', name: 'Here Comes the Sun', artist: 'The Beatles', album: 'Abbey Road', albumArt: null, durationMs: 185000 },
+  ],
+};
+
+const MOCK_ALBUMS: Album[] = [
+  { id: 'thriller', uri: 'mock:album:thriller', name: 'Thriller', artist: 'Michael Jackson', albumArt: null, trackCount: MOCK_ALBUM_TRACKS.thriller.length },
+  { id: 'rumours', uri: 'mock:album:rumours', name: 'Rumours', artist: 'Fleetwood Mac', albumArt: null, trackCount: MOCK_ALBUM_TRACKS.rumours.length },
+  { id: 'abbeyroad', uri: 'mock:album:abbeyroad', name: 'Abbey Road', artist: 'The Beatles', albumArt: null, trackCount: MOCK_ALBUM_TRACKS.abbeyroad.length },
+];
+
+function allMockTracks(): Track[] {
+  return [
+    ...Object.values(MOCK_TRACKS).flat(),
+    ...Object.values(MOCK_ALBUM_TRACKS).flat(),
+  ];
+}
+
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -87,45 +144,153 @@ export function createMockService(): SpotifyService {
       await sleep(300);
       return MOCK_TRACKS[playlistId] ?? MOCK_TRACKS.liked;
     },
-    async playTrack() {},
+    async getAlbums() {
+      await sleep(250);
+      return MOCK_ALBUMS;
+    },
+    async getAlbumTracks(album) {
+      await sleep(300);
+      return MOCK_ALBUM_TRACKS[album.id] ?? [];
+    },
+    async getRecentlyPlayed() {
+      await sleep(250);
+      // A believable "recent" slice drawn from across the mock catalog.
+      return [
+        MOCK_TRACKS.chill[1],
+        MOCK_TRACKS.liked[5],
+        MOCK_TRACKS.workout[0],
+        MOCK_TRACKS.road[2],
+        MOCK_TRACKS.late[0],
+        MOCK_TRACKS.liked[0],
+      ];
+    },
+    async search(query) {
+      await sleep(200);
+      const q = query.trim().toLowerCase();
+      if (!q) return [];
+      return allMockTracks().filter(
+        (t) => t.name.toLowerCase().includes(q) || t.artist.toLowerCase().includes(q)
+      );
+    },
+    async play() {},
     async pause() {},
     async resume() {},
     async next() {},
     async previous() {},
     async seek() {},
     async setVolume() {},
+    async setShuffle() {},
+    async setRepeat() {},
   };
 }
 
 // ── Real Spotify service ───────────────────────────────────
 
-export function createSpotifyService(accessToken: string): SpotifyService {
-  const api = (path: string, opts: RequestInit = {}) =>
-    fetch(`https://api.spotify.com/v1${path}`, {
+export type SpotifyTokenProvider = () => Promise<string | null>;
+
+export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifyService {
+  const request = async (path: string, opts: RequestInit = {}) => {
+    const token = await getToken();
+    if (!token) throw new Error('Not logged in to Spotify');
+    const res = await fetch(`https://api.spotify.com/v1${path}`, {
       ...opts,
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
         ...(opts.headers ?? {}),
       },
     });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = (data as { error?: { message?: string } })?.error?.message;
+      throw new Error(msg ?? `Spotify API error (${res.status})`);
+    }
+    return data;
+  };
 
   return {
     async getPlaylists() {
-      const res = await api('/me/playlists?limit=50');
-      const data = await res.json();
+      const data = await request('/me/playlists?limit=50');
       return (data.items ?? []).map((p: any) => ({
         id: p.id,
         name: p.name,
-        trackCount: p.tracks?.total ?? 0,
+        // Spotify now exposes count on `items`; `tracks` is deprecated.
+        trackCount: p.items?.total ?? p.tracks?.total ?? 0,
       }));
     },
 
     async getTracks(playlistId) {
-      const res = await api(`/playlists/${playlistId}/tracks?limit=100`);
-      const data = await res.json();
+      const tracks: Track[] = [];
+      let offset = 0;
+      const limit = 50;
+
+      while (true) {
+        const data = await request(
+          `/playlists/${playlistId}/items?limit=${limit}&offset=${offset}&additional_types=track`
+        );
+
+        for (const row of data.items ?? []) {
+          const raw = row.track ?? row.item;
+          if (!raw?.id || raw.type === 'episode') continue;
+          tracks.push({
+            id: raw.id,
+            uri: raw.uri,
+            name: raw.name,
+            artist: raw.artists?.[0]?.name ?? 'Unknown',
+            album: raw.album?.name ?? '',
+            albumArt: raw.album?.images?.[0]?.url ?? null,
+            durationMs: raw.duration_ms,
+          });
+        }
+
+        if (!data.next) break;
+        offset += limit;
+      }
+
+      return tracks;
+    },
+
+    async getAlbums() {
+      const data = await request('/me/albums?limit=50');
+      return (data.items ?? [])
+        .filter((item: any) => item?.album?.id)
+        .map((item: any) => ({
+          id: item.album.id,
+          uri: item.album.uri,
+          name: item.album.name,
+          artist: item.album.artists?.[0]?.name ?? 'Unknown',
+          albumArt: item.album.images?.[0]?.url ?? null,
+          trackCount: item.album.total_tracks ?? 0,
+        }));
+    },
+
+    async getAlbumTracks(album) {
+      // The album-tracks endpoint omits album art per track, so fold in the
+      // parent album's name and artwork.
+      const data = await request(`/albums/${album.id}/tracks?limit=50`);
+      return (data.items ?? [])
+        .filter((t: any) => t?.id)
+        .map((t: any) => ({
+          id: t.id,
+          uri: t.uri,
+          name: t.name,
+          artist: t.artists?.[0]?.name ?? album.artist,
+          album: album.name,
+          albumArt: album.albumArt,
+          durationMs: t.duration_ms,
+        }));
+    },
+
+    async getRecentlyPlayed() {
+      const data = await request('/me/player/recently-played?limit=50');
+      const seen = new Set<string>();
       return (data.items ?? [])
         .filter((item: any) => item?.track?.id)
+        .filter((item: any) => {
+          if (seen.has(item.track.id)) return false;
+          seen.add(item.track.id);
+          return true;
+        })
         .map((item: any) => ({
           id: item.track.id,
           uri: item.track.uri,
@@ -137,39 +302,69 @@ export function createSpotifyService(accessToken: string): SpotifyService {
         }));
     },
 
-    async playTrack(playlistId, trackIndex, deviceId) {
-      await api(`/me/player/play?device_id=${deviceId}`, {
+    async search(query) {
+      const data = await request(`/search?type=track&limit=30&q=${encodeURIComponent(query)}`);
+      return (data.tracks?.items ?? [])
+        .filter((t: any) => t?.id)
+        .map((t: any) => ({
+          id: t.id,
+          uri: t.uri,
+          name: t.name,
+          artist: t.artists?.[0]?.name ?? 'Unknown',
+          album: t.album?.name ?? '',
+          albumArt: t.album?.images?.[0]?.url ?? null,
+          durationMs: t.duration_ms,
+        }));
+    },
+
+    async play(source, trackIndex, deviceId) {
+      const body: Record<string, unknown> = { position_ms: 0 };
+      if ('contextUri' in source) {
+        body.context_uri = source.contextUri;
+        body.offset = { position: trackIndex };
+      } else {
+        body.uris = source.uris;
+        body.offset = { position: trackIndex };
+      }
+      await request(`/me/player/play?device_id=${deviceId}`, {
         method: 'PUT',
-        body: JSON.stringify({
-          context_uri: `spotify:playlist:${playlistId}`,
-          offset: { position: trackIndex },
-          position_ms: 0,
-        }),
+        body: JSON.stringify(body),
       });
     },
 
     async pause(deviceId) {
-      await api(`/me/player/pause?device_id=${deviceId}`, { method: 'PUT' });
+      await request(`/me/player/pause?device_id=${deviceId}`, { method: 'PUT' });
     },
 
     async resume(deviceId) {
-      await api(`/me/player/play?device_id=${deviceId}`, { method: 'PUT' });
+      await request(`/me/player/play?device_id=${deviceId}`, { method: 'PUT' });
     },
 
     async next(deviceId) {
-      await api(`/me/player/next?device_id=${deviceId}`, { method: 'POST' });
+      await request(`/me/player/next?device_id=${deviceId}`, { method: 'POST' });
     },
 
     async previous(deviceId) {
-      await api(`/me/player/previous?device_id=${deviceId}`, { method: 'POST' });
+      await request(`/me/player/previous?device_id=${deviceId}`, { method: 'POST' });
     },
 
     async seek(positionMs, deviceId) {
-      await api(`/me/player/seek?position_ms=${positionMs}&device_id=${deviceId}`, { method: 'PUT' });
+      await request(`/me/player/seek?position_ms=${positionMs}&device_id=${deviceId}`, { method: 'PUT' });
     },
 
-    async setVolume(volumePct) {
-      await api(`/me/player/volume?volume_percent=${Math.round(volumePct)}`, { method: 'PUT' });
+    async setVolume(volumePct, deviceId) {
+      await request(
+        `/me/player/volume?volume_percent=${Math.round(volumePct)}&device_id=${deviceId}`,
+        { method: 'PUT' }
+      );
+    },
+
+    async setShuffle(state, deviceId) {
+      await request(`/me/player/shuffle?state=${state}&device_id=${deviceId}`, { method: 'PUT' });
+    },
+
+    async setRepeat(mode, deviceId) {
+      await request(`/me/player/repeat?state=${mode}&device_id=${deviceId}`, { method: 'PUT' });
     },
   };
 }

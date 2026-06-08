@@ -1,45 +1,71 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ClickWheel from './components/ClickWheel';
+import LyricsScreen from './components/LyricsScreen';
+import SearchScreen, { SEARCH_KEYS } from './components/SearchScreen';
 import { useSpotifyPlayer } from './hooks/useSpotifyPlayer';
 import {
   albumArtPlaceholder,
   createMockService,
   createSpotifyService,
   formatTime,
+  Album,
   Playlist,
+  PlaySource,
+  RepeatMode,
   SpotifyService,
   Track,
 } from './services/spotify';
 import {
   exchangeCodeForToken,
+  getRedirectUriWarning,
+  getSpotifyRedirectUri,
   getStoredToken,
+  refreshAccessToken,
   redirectToSpotifyLogin,
 } from './services/auth';
+import { fetchLyrics, type TrackLyrics } from './services/lyrics';
 
 // ── Types ──────────────────────────────────────────────────
 
-type Screen = 'login' | 'mainMenu' | 'music' | 'playlists' | 'tracks' | 'nowPlaying' | 'settings';
+type Screen =
+  | 'login'
+  | 'mainMenu'
+  | 'music'
+  | 'playlists'
+  | 'albums'
+  | 'tracks'
+  | 'nowPlaying'
+  | 'lyrics'
+  | 'settings'
+  | 'search';
+
+type Theme = 'light' | 'black';
 
 interface NavEntry {
   screen: Screen;
   index: number;
 }
 
-const MAIN_MENU = ['Music', 'Now Playing', 'Settings'];
-const MUSIC_MENU = ['Playlists'];
+const MAIN_MENU = ['Music', 'Search', 'Now Playing', 'Settings'];
+const MUSIC_MENU = ['Playlists', 'Albums', 'Recently Played'];
+const SETTINGS_MENU = ['Shuffle', 'Repeat', 'Theme', 'About'];
+
+const REPEAT_ORDER: RepeatMode[] = ['off', 'context', 'track'];
 
 const SCREEN_TITLES: Record<Screen, string> = {
   login: 'OldPod.fm',
   mainMenu: 'iPod',
   music: 'Music',
   playlists: 'Playlists',
+  albums: 'Albums',
   tracks: 'Songs',
   nowPlaying: 'Now Playing',
+  lyrics: 'Lyrics',
   settings: 'Settings',
+  search: 'Search',
 };
 
 // ── Helpers ────────────────────────────────────────────────
-
 
 function visibleWindow<T>(items: T[], selectedIdx: number, windowSize = 7): [T[], number] {
   const half = Math.floor(windowSize / 2);
@@ -47,6 +73,21 @@ function visibleWindow<T>(items: T[], selectedIdx: number, windowSize = 7): [T[]
   const end = Math.min(items.length, start + windowSize);
   start = Math.max(0, end - windowSize);
   return [items.slice(start, end), selectedIdx - start];
+}
+
+// Picks the next track index, honouring shuffle. Used for demo auto-advance.
+function pickNextIndex(curr: number, len: number, shuffle: boolean): number {
+  if (len <= 0) return 0;
+  if (shuffle && len > 1) {
+    let n = curr;
+    while (n === curr) n = Math.floor(Math.random() * len);
+    return n;
+  }
+  return curr + 1;
+}
+
+function repeatLabel(mode: RepeatMode): string {
+  return mode === 'off' ? 'Off' : mode === 'context' ? 'All' : 'One';
 }
 
 // ── App ────────────────────────────────────────────────────
@@ -74,16 +115,41 @@ export default function App() {
 
   // Auth
   const [accessToken, setAccessToken] = useState<string | null>(getStoredToken);
-  const [isDemoMode, setIsDemoMode] = useState(() => localStorage.getItem('demo_mode') === '1');
+  const [isDemoMode, setIsDemoMode] = useState(() => {
+    if (getStoredToken() || localStorage.getItem('spot_refresh')) return false;
+    return localStorage.getItem('demo_mode') === '1';
+  });
+  const [dataError, setDataError] = useState<string | null>(null);
 
   // Service
   const [service, setService] = useState<SpotifyService | null>(null);
 
   // Data
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [albums, setAlbums] = useState<Album[]>([]);
   const [tracks, setTracks] = useState<Track[]>([]);
-  const [activePlaylist, setActivePlaylist] = useState<Playlist | null>(null);
+  const [trackSource, setTrackSource] = useState<PlaySource | null>(null);
+  const [tracksTitle, setTracksTitle] = useState('Songs');
   const [isLoading, setIsLoading] = useState(false);
+
+  // Search
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // Theme
+  const [theme, setTheme] = useState<Theme>(() => {
+    const stored = localStorage.getItem('theme');
+    return stored === 'light' ? 'light' : 'black';
+  });
+
+  // Lyrics (LRCLib)
+  const [lyrics, setLyrics] = useState<TrackLyrics | null>(null);
+  const [lyricsLoading, setLyricsLoading] = useState(false);
+  const [lyricsUserScrolled, setLyricsUserScrolled] = useState(false);
+  const lyricsTrackIdRef = useRef<string | null>(null);
+
+  // Playback options
+  const [shuffle, setShuffle] = useState(false);
+  const [repeat, setRepeat] = useState<RepeatMode>('off');
 
   // Playback state (demo-mode managed here; real mode driven by SDK)
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
@@ -94,19 +160,47 @@ export default function App() {
   const playingTracksRef = useRef<Track[]>([]);
 
   // Spotify SDK player (real mode)
-  const { deviceId, sdkState } = useSpotifyPlayer(accessToken);
+  const {
+    deviceId,
+    isReady,
+    playerError,
+    sdkState,
+    activatePlayback,
+    runWithDevice,
+    setPlayerVolume,
+  } = useSpotifyPlayer(accessToken);
 
-  // ── Init service ─────────────────────────────────────────
+  const resolveSpotifyToken = useCallback(async (): Promise<string | null> => {
+    let token = getStoredToken();
+    if (!token) token = await refreshAccessToken();
+    if (token) {
+      setAccessToken(token);
+      return token;
+    }
+    return null;
+  }, []);
+
+  // ── Init service + session bootstrap ─────────────────────
 
   useEffect(() => {
     if (isDemoMode) {
       setService(createMockService());
-      push('mainMenu');
-    } else if (accessToken) {
-      setService(createSpotifyService(accessToken));
-      push('mainMenu');
+      return;
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    setService(createSpotifyService(resolveSpotifyToken));
+  }, [isDemoMode, resolveSpotifyToken]);
+
+  useEffect(() => {
+    if (isDemoMode) {
+      if (nav[0]?.screen === 'login') setNav([{ screen: 'mainMenu', index: 0 }]);
+      return;
+    }
+    void resolveSpotifyToken().then((tok) => {
+      if (tok && nav[0]?.screen === 'login') {
+        setNav([{ screen: 'mainMenu', index: 0 }]);
+      }
+    });
+  }, [isDemoMode, resolveSpotifyToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Handle PKCE callback (?code=...) ────────────────────
 
@@ -116,11 +210,19 @@ export default function App() {
     if (!code) return;
     window.history.replaceState(null, '', window.location.pathname);
     exchangeCodeForToken(code).then((tok) => {
+      localStorage.removeItem('demo_mode');
+      setIsDemoMode(false);
       setAccessToken(tok);
-      setService(createSpotifyService(tok));
+      setService(createSpotifyService(resolveSpotifyToken));
       setNav([{ screen: 'mainMenu', index: 0 }]);
     }).catch(console.error);
   }, []);
+
+  // ── Apply theme ──────────────────────────────────────────
+
+  useEffect(() => {
+    localStorage.setItem('theme', theme);
+  }, [theme]);
 
   // ── SDK state sync (real mode) ───────────────────────────
 
@@ -137,48 +239,115 @@ export default function App() {
     if (!isDemoMode || !isPlaying || !currentTrack) return;
     const id = setInterval(() => {
       setPositionMs((prev) => {
-        if (prev + 1000 >= currentTrack.durationMs) {
-          // Auto-advance
-          const nextIdx = currentTrackIndex + 1;
-          if (nextIdx < playingTracksRef.current.length) {
-            const next = playingTracksRef.current[nextIdx];
-            setCurrentTrackIndex(nextIdx);
-            setCurrentTrack(next);
-            return 0;
-          } else {
-            setIsPlaying(false);
-            return currentTrack.durationMs;
-          }
+        if (prev + 1000 < currentTrack.durationMs) return prev + 1000;
+
+        // Track finished — decide what plays next based on repeat/shuffle.
+        const list = playingTracksRef.current;
+        if (repeat === 'track') return 0;
+
+        const nextIdx = pickNextIndex(currentTrackIndex, list.length, shuffle);
+        if (nextIdx < list.length) {
+          const next = list[nextIdx];
+          setCurrentTrackIndex(nextIdx);
+          setCurrentTrack(next);
+          return 0;
         }
-        return prev + 1000;
+        if (repeat === 'context' && list.length > 0) {
+          setCurrentTrackIndex(0);
+          setCurrentTrack(list[0]);
+          return 0;
+        }
+        setIsPlaying(false);
+        return currentTrack.durationMs;
       });
     }, 1000);
     return () => clearInterval(id);
-  }, [isDemoMode, isPlaying, currentTrack, currentTrackIndex]);
+  }, [isDemoMode, isPlaying, currentTrack, currentTrackIndex, repeat, shuffle]);
 
-  // ── Load playlists ────────────────────────────────────────
+  // ── Data loaders ─────────────────────────────────────────
 
   const loadPlaylists = useCallback(async () => {
     if (!service) return;
     setIsLoading(true);
+    setDataError(null);
     try {
-      const data = await service.getPlaylists();
-      setPlaylists(data);
+      setPlaylists(await service.getPlaylists());
+    } catch (e) {
+      setPlaylists([]);
+      setDataError(e instanceof Error ? e.message : 'Could not load playlists');
     } finally {
       setIsLoading(false);
     }
   }, [service]);
 
-  // ── Load tracks ───────────────────────────────────────────
+  const loadAlbums = useCallback(async () => {
+    if (!service) return;
+    setIsLoading(true);
+    setDataError(null);
+    try {
+      setAlbums(await service.getAlbums());
+    } catch (e) {
+      setAlbums([]);
+      setDataError(e instanceof Error ? e.message : 'Could not load albums');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [service]);
 
-  const loadTracks = useCallback(
+  const loadPlaylistTracks = useCallback(
     async (playlist: Playlist) => {
       if (!service) return;
       setIsLoading(true);
-      setActivePlaylist(playlist);
+      setTracksTitle(playlist.name);
       try {
         const data = await service.getTracks(playlist.id);
         setTracks(data);
+        setTrackSource({ contextUri: `spotify:playlist:${playlist.id}` });
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [service]
+  );
+
+  const loadAlbumTracks = useCallback(
+    async (album: Album) => {
+      if (!service) return;
+      setIsLoading(true);
+      setTracksTitle(album.name);
+      try {
+        const data = await service.getAlbumTracks(album);
+        setTracks(data);
+        setTrackSource({ contextUri: album.uri });
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [service]
+  );
+
+  const loadRecentlyPlayed = useCallback(async () => {
+    if (!service) return;
+    setIsLoading(true);
+    setTracksTitle('Recently Played');
+    try {
+      const data = await service.getRecentlyPlayed();
+      setTracks(data);
+      setTrackSource({ uris: data.map((t) => t.uri) });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [service]);
+
+  const runSearch = useCallback(
+    async (query: string) => {
+      if (!service) return;
+      setIsLoading(true);
+      setTracksTitle('Results');
+      try {
+        const data = await service.search(query);
+        setTracks(data);
+        setTrackSource({ uris: data.map((t) => t.uri) });
       } finally {
         setIsLoading(false);
       }
@@ -188,66 +357,154 @@ export default function App() {
 
   // ── Playback controls ─────────────────────────────────────
 
-  const playTrack = useCallback(
-    async (trackList: Track[], idx: number) => {
+  const playFromList = useCallback(
+    async (trackList: Track[], idx: number, source: PlaySource) => {
       const track = trackList[idx];
+      if (!track) return;
       playingTracksRef.current = trackList;
       setCurrentTrack(track);
       setCurrentTrackIndex(idx);
       setPositionMs(0);
       setIsPlaying(true);
-      if (!isDemoMode && service && activePlaylist && deviceId) {
-        await service.playTrack(activePlaylist.id, idx, deviceId);
+      if (!isDemoMode && service) {
+        try {
+          await activatePlayback();
+          await runWithDevice((id) => service.play(source, idx, id));
+        } catch {
+          setIsPlaying(false);
+        }
       }
     },
-    [isDemoMode, service, activePlaylist, deviceId]
+    [isDemoMode, service, activatePlayback, runWithDevice]
   );
 
   const togglePlay = useCallback(async () => {
     const next = !isPlaying;
     setIsPlaying(next);
-    if (!isDemoMode && service && deviceId) {
-      if (next) await service.resume(deviceId);
-      else await service.pause(deviceId);
+    if (!isDemoMode && service) {
+      try {
+        await activatePlayback();
+        await runWithDevice((id) => (next ? service.resume(id) : service.pause(id)));
+      } catch {
+        setIsPlaying(!next);
+      }
     }
-  }, [isPlaying, isDemoMode, service, deviceId]);
+  }, [isPlaying, isDemoMode, service, activatePlayback, runWithDevice]);
 
   const skipNext = useCallback(async () => {
     const list = playingTracksRef.current;
-    const nextIdx = currentTrackIndex + 1;
+    const nextIdx = pickNextIndex(currentTrackIndex, list.length, shuffle);
     if (nextIdx < list.length) {
-      await playTrack(list, nextIdx);
+      const next = list[nextIdx];
+      setCurrentTrack(next);
+      setCurrentTrackIndex(nextIdx);
+      setPositionMs(0);
     }
-    if (!isDemoMode && service && deviceId) {
-      await service.next(deviceId);
+    if (!isDemoMode && service) {
+      try {
+        await activatePlayback();
+        await runWithDevice((id) => service.next(id));
+      } catch {
+        /* keep UI state */
+      }
     }
-  }, [currentTrackIndex, isDemoMode, service, deviceId, playTrack]);
+  }, [currentTrackIndex, shuffle, isDemoMode, service, activatePlayback, runWithDevice]);
 
   const skipPrev = useCallback(async () => {
     const list = playingTracksRef.current;
     if (positionMs > 3000 || currentTrackIndex === 0) {
       setPositionMs(0);
-      if (!isDemoMode && service && deviceId) {
-        await service.seek(0, deviceId);
+      if (!isDemoMode && service) {
+        try {
+          await activatePlayback();
+          await runWithDevice((id) => service.seek(0, id));
+        } catch {
+          /* keep UI state */
+        }
       }
     } else {
       const prevIdx = currentTrackIndex - 1;
-      await playTrack(list, prevIdx);
-      if (!isDemoMode && service && deviceId) {
-        await service.previous(deviceId);
+      setCurrentTrack(list[prevIdx]);
+      setCurrentTrackIndex(prevIdx);
+      setPositionMs(0);
+      if (!isDemoMode && service) {
+        try {
+          await activatePlayback();
+          await runWithDevice((id) => service.previous(id));
+        } catch {
+          /* keep UI state */
+        }
       }
     }
-  }, [currentTrackIndex, positionMs, isDemoMode, service, deviceId, playTrack]);
+  }, [currentTrackIndex, positionMs, isDemoMode, service, activatePlayback, runWithDevice]);
 
   const adjustVolume = useCallback(
     (delta: number) => {
       const newVol = Math.max(0, Math.min(100, volume + delta));
       setVolume(newVol);
-      if (!isDemoMode && service) {
-        service.setVolume(newVol);
+      if (!isDemoMode && service && deviceId) {
+        void service.setVolume(newVol, deviceId);
+        setPlayerVolume(newVol);
       }
     },
-    [volume, isDemoMode, service]
+    [volume, isDemoMode, service, deviceId, setPlayerVolume]
+  );
+
+  // ── Settings toggles ─────────────────────────────────────
+
+  const toggleShuffle = useCallback(() => {
+    const next = !shuffle;
+    setShuffle(next);
+    if (!isDemoMode && service && deviceId) service.setShuffle(next, deviceId);
+  }, [shuffle, isDemoMode, service, deviceId]);
+
+  const cycleRepeat = useCallback(() => {
+    const next = REPEAT_ORDER[(REPEAT_ORDER.indexOf(repeat) + 1) % REPEAT_ORDER.length];
+    setRepeat(next);
+    if (!isDemoMode && service && deviceId) service.setRepeat(next, deviceId);
+  }, [repeat, isDemoMode, service, deviceId]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((t) => (t === 'black' ? 'light' : 'black'));
+  }, []);
+
+  // ── Lyrics ────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (currentTrack?.id !== lyricsTrackIdRef.current) {
+      setLyrics(null);
+      lyricsTrackIdRef.current = null;
+    }
+  }, [currentTrack?.id]);
+
+  const openLyrics = useCallback(() => {
+    if (!currentTrack) return;
+    push('lyrics');
+    setLyricsUserScrolled(false);
+    setIndex(0);
+
+    if (lyricsTrackIdRef.current === currentTrack.id) return;
+
+    setLyricsLoading(true);
+    fetchLyrics(currentTrack, isDemoMode)
+      .then((data) => {
+        setLyrics(data);
+        lyricsTrackIdRef.current = currentTrack.id;
+      })
+      .finally(() => setLyricsLoading(false));
+  }, [currentTrack, isDemoMode, push, setIndex]);
+
+  // ── Search key handling ──────────────────────────────────
+
+  const handleSearchKey = useCallback(
+    (idx: number) => {
+      const key = SEARCH_KEYS[idx];
+      if (key === 'SPACE') setSearchQuery((q) => q + ' ');
+      else if (key === 'DEL') setSearchQuery((q) => q.slice(0, -1));
+      else if (key === 'GO') runSearch(searchQuery).then(() => push('tracks'));
+      else setSearchQuery((q) => q + key);
+    },
+    [searchQuery, runSearch, push]
   );
 
   // ── Select action (takes explicit index to avoid stale closure) ──
@@ -257,10 +514,12 @@ export default function App() {
       switch (currentScreen) {
         case 'login': {
           if (idx === 0) {
+            setIsDemoMode(false);
             redirectToSpotifyLogin();
           } else {
             localStorage.setItem('demo_mode', '1');
             setIsDemoMode(true);
+            setAccessToken(null);
             setService(createMockService());
             setNav([{ screen: 'mainMenu', index: 0 }]);
           }
@@ -268,30 +527,52 @@ export default function App() {
         }
         case 'mainMenu': {
           if (idx === 0) push('music');
-          else if (idx === 1) push('nowPlaying');
-          else if (idx === 2) push('settings');
+          else if (idx === 1) push('search');
+          else if (idx === 2) push('nowPlaying');
+          else if (idx === 3) push('settings');
           break;
         }
         case 'music': {
           if (idx === 0) loadPlaylists().then(() => push('playlists'));
+          else if (idx === 1) loadAlbums().then(() => push('albums'));
+          else if (idx === 2) loadRecentlyPlayed().then(() => push('tracks'));
           break;
         }
         case 'playlists': {
           const pl = playlists[idx];
-          if (pl) loadTracks(pl).then(() => push('tracks'));
+          if (pl) loadPlaylistTracks(pl).then(() => push('tracks'));
+          break;
+        }
+        case 'albums': {
+          const al = albums[idx];
+          if (al) loadAlbumTracks(al).then(() => push('tracks'));
           break;
         }
         case 'tracks': {
-          const track = tracks[idx];
-          if (track) playTrack(tracks, idx).then(() => push('nowPlaying'));
+          if (tracks[idx] && trackSource) playFromList(tracks, idx, trackSource).then(() => push('nowPlaying'));
+          break;
+        }
+        case 'settings': {
+          if (idx === 0) toggleShuffle();
+          else if (idx === 1) cycleRepeat();
+          else if (idx === 2) toggleTheme();
+          break;
+        }
+        case 'search': {
+          handleSearchKey(idx);
           break;
         }
         case 'nowPlaying':
-          togglePlay();
+          openLyrics();
           break;
       }
     },
-    [currentScreen, push, playlists, tracks, loadPlaylists, loadTracks, playTrack, togglePlay]
+    [
+      currentScreen, push, playlists, albums, tracks, trackSource,
+      loadPlaylists, loadAlbums, loadPlaylistTracks, loadAlbumTracks,
+      loadRecentlyPlayed, playFromList, openLyrics, toggleShuffle,
+      cycleRepeat, toggleTheme, handleSearchKey,
+    ]
   );
 
   // Clicking a list item: update selection + immediately act on it
@@ -311,11 +592,19 @@ export default function App() {
         adjustVolume(direction === 'down' ? 5 : -5);
         return;
       }
+      if (currentScreen === 'lyrics') {
+        const listLen = lyrics?.lines.length ?? 0;
+        if (listLen === 0) return;
+        setLyricsUserScrolled(true);
+        const delta = direction === 'down' ? 1 : -1;
+        setIndex(Math.max(0, Math.min(listLen - 1, selectedIndex + delta)));
+        return;
+      }
       const listLen = getListLength(currentScreen);
       const delta = direction === 'down' ? 1 : -1;
       setIndex(Math.max(0, Math.min(listLen - 1, selectedIndex + delta)));
     },
-    [currentScreen, selectedIndex, adjustVolume, setIndex] // eslint-disable-line react-hooks/exhaustive-deps
+    [currentScreen, selectedIndex, adjustVolume, setIndex, lyrics] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   const handleClick = useCallback(
@@ -336,18 +625,19 @@ export default function App() {
       case 'login': return 2;
       case 'mainMenu': return MAIN_MENU.length;
       case 'music': return MUSIC_MENU.length;
+      case 'settings': return SETTINGS_MENU.length;
       case 'playlists': return playlists.length;
+      case 'albums': return albums.length;
       case 'tracks': return tracks.length;
+      case 'search': return SEARCH_KEYS.length;
+      case 'lyrics': return lyrics?.lines.length ?? 0;
       default: return 0;
     }
   }
 
   // ── Screen title ──────────────────────────────────────────
 
-  const screenTitle =
-    currentScreen === 'tracks' && activePlaylist
-      ? activePlaylist.name
-      : SCREEN_TITLES[currentScreen];
+  const screenTitle = currentScreen === 'tracks' ? tracksTitle : SCREEN_TITLES[currentScreen];
 
   // ── Render ────────────────────────────────────────────────
 
@@ -355,20 +645,23 @@ export default function App() {
     <div
       style={{
         minHeight: '100vh',
-        background: 'radial-gradient(ellipse at center, #c8c8c8 0%, #909090 100%)',
+        background:
+          theme === 'black'
+            ? 'radial-gradient(ellipse at center, #3a3a3a 0%, #1a1a1a 100%)'
+            : 'radial-gradient(ellipse at center, #c8c8c8 0%, #909090 100%)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         padding: '24px',
       }}
     >
-      <div className="ipod">
+      <div className={`ipod${theme === 'black' ? ' ipod-black' : ''}`}>
         {/* Screen */}
         <div className="ipod-bezel">
           <div className="ipod-screen">
             <div className="screen-header">{screenTitle}</div>
             <div className="screen-body">
-              {isLoading ? (
+              {isLoading && currentScreen !== 'lyrics' ? (
                 <LoadingView />
               ) : (
                 <ScreenContent
@@ -377,11 +670,22 @@ export default function App() {
                   mainMenu={MAIN_MENU}
                   musicMenu={MUSIC_MENU}
                   playlists={playlists}
+                  albums={albums}
                   tracks={tracks}
                   currentTrack={currentTrack}
                   isPlaying={isPlaying}
                   positionMs={positionMs}
                   volume={volume}
+                  shuffle={shuffle}
+                  repeat={repeat}
+                  theme={theme}
+                  isPlayerReady={isReady}
+                  playerError={playerError}
+                  searchQuery={searchQuery}
+                  dataError={dataError}
+                  lyrics={lyrics}
+                  lyricsLoading={lyricsLoading}
+                  lyricsUserScrolled={lyricsUserScrolled}
                   onItemClick={handleItemClick}
                 />
               )}
@@ -404,11 +708,22 @@ interface ScreenProps {
   mainMenu: string[];
   musicMenu: string[];
   playlists: Playlist[];
+  albums: Album[];
   tracks: Track[];
   currentTrack: Track | null;
   isPlaying: boolean;
   positionMs: number;
   volume: number;
+  shuffle: boolean;
+  repeat: RepeatMode;
+  theme: Theme;
+  isPlayerReady: boolean;
+  playerError: string | null;
+  searchQuery: string;
+  dataError: string | null;
+  lyrics: TrackLyrics | null;
+  lyricsLoading: boolean;
+  lyricsUserScrolled: boolean;
   onItemClick: (index: number) => void;
 }
 
@@ -444,6 +759,20 @@ function ScreenContent(props: ScreenProps) {
           }))}
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
+          emptyLabel={props.dataError ?? 'No playlists'}
+        />
+      );
+    case 'albums':
+      return (
+        <MenuScreen
+          items={props.albums.map((a) => ({
+            label: a.name,
+            detail: a.artist,
+            arrow: true,
+          }))}
+          selectedIndex={selectedIndex}
+          onItemClick={onItemClick}
+          emptyLabel={props.dataError ?? 'No albums'}
         />
       );
     case 'tracks':
@@ -455,6 +784,28 @@ function ScreenContent(props: ScreenProps) {
           }))}
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
+          emptyLabel="No songs"
+        />
+      );
+    case 'settings':
+      return (
+        <MenuScreen
+          items={[
+            { label: 'Shuffle', detail: props.shuffle ? 'On' : 'Off' },
+            { label: 'Repeat', detail: repeatLabel(props.repeat) },
+            { label: 'Theme', detail: props.theme === 'black' ? 'Classic' : 'White' },
+            { label: 'About', detail: 'v1.0' },
+          ]}
+          selectedIndex={selectedIndex}
+          onItemClick={onItemClick}
+        />
+      );
+    case 'search':
+      return (
+        <SearchScreen
+          query={props.searchQuery}
+          selectedIndex={selectedIndex}
+          onKeyClick={onItemClick}
         />
       );
     case 'nowPlaying':
@@ -464,10 +815,22 @@ function ScreenContent(props: ScreenProps) {
           isPlaying={props.isPlaying}
           positionMs={props.positionMs}
           volume={props.volume}
+          shuffle={props.shuffle}
+          repeat={props.repeat}
+          isPlayerReady={props.isPlayerReady}
+          playerError={props.playerError}
         />
       );
-    case 'settings':
-      return <SettingsScreen volume={props.volume} />;
+    case 'lyrics':
+      return (
+        <LyricsScreen
+          lyrics={props.lyrics}
+          loading={props.lyricsLoading}
+          positionMs={props.positionMs}
+          selectedIndex={selectedIndex}
+          userScrolled={props.lyricsUserScrolled}
+        />
+      );
     default:
       return null;
   }
@@ -476,10 +839,22 @@ function ScreenContent(props: ScreenProps) {
 // ── Login screen ───────────────────────────────────────────
 
 function LoginScreen({ selectedIndex, onItemClick }: { selectedIndex: number; onItemClick: (i: number) => void }) {
+  const redirectUri = getSpotifyRedirectUri();
+  const redirectWarning = getRedirectUriWarning();
+
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div className="login-screen" style={{ flex: 1 }}>
         <div className="login-logo">🎵 OldPod.fm</div>
+        {redirectWarning ? (
+          <p className="login-sub login-sub--warn">{redirectWarning}</p>
+        ) : (
+          <p className="login-sub">
+            Spotify redirect URI:
+            <br />
+            <span className="login-uri">{redirectUri}</span>
+          </p>
+        )}
       </div>
       <ul className="menu-list">
         {['Login with Spotify', 'Demo Mode'].map((label, i) => (
@@ -505,7 +880,34 @@ interface MenuItem {
   arrow?: boolean;
 }
 
-function MenuScreen({ items, selectedIndex, onItemClick }: { items: MenuItem[]; selectedIndex: number; onItemClick: (i: number) => void }) {
+function MenuScreen({
+  items,
+  selectedIndex,
+  onItemClick,
+  emptyLabel,
+}: {
+  items: MenuItem[];
+  selectedIndex: number;
+  onItemClick: (i: number) => void;
+  emptyLabel?: string;
+}) {
+  if (items.length === 0 && emptyLabel) {
+    return (
+      <div
+        style={{
+          height: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: '11px',
+          color: '#555',
+        }}
+      >
+        {emptyLabel}
+      </div>
+    );
+  }
+
   const [visible, localSelected] = visibleWindow(items, selectedIndex);
   const startOffset = selectedIndex - localSelected;
 
@@ -538,11 +940,19 @@ function NowPlayingScreen({
   isPlaying,
   positionMs,
   volume,
+  shuffle,
+  repeat,
+  isPlayerReady,
+  playerError,
 }: {
   track: Track | null;
   isPlaying: boolean;
   positionMs: number;
   volume: number;
+  shuffle: boolean;
+  repeat: RepeatMode;
+  isPlayerReady: boolean;
+  playerError: string | null;
 }) {
   if (!track) {
     return (
@@ -579,7 +989,23 @@ function NowPlayingScreen({
           <div className="track-name">{track.name}</div>
           <div className="track-artist">{track.artist}</div>
           <div className="track-album">{track.album}</div>
-          <div style={{ fontSize: '10px', marginTop: '2px' }}>{isPlaying ? '▶ Playing' : '⏸ Paused'}</div>
+          <div className="np-status">
+            <span>
+              {playerError
+                ? '⚠ Error'
+                : !isPlayerReady
+                  ? 'Connecting…'
+                  : isPlaying
+                    ? '▶ Playing'
+                    : '⏸ Paused'}
+            </span>
+            {shuffle && <span className="np-badge" title="Shuffle">⤨</span>}
+            {repeat !== 'off' && (
+              <span className="np-badge" title={`Repeat ${repeatLabel(repeat)}`}>
+                {repeat === 'track' ? '↻¹' : '↻'}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
@@ -591,7 +1017,7 @@ function NowPlayingScreen({
       {/* Times */}
       <div className="time-row">
         <span>{formatTime(positionMs)}</span>
-        <span>-{formatTime(track.durationMs - positionMs)}</span>
+        <span>-{formatTime(Math.max(0, track.durationMs - positionMs))}</span>
       </div>
 
       {/* Volume */}
@@ -602,23 +1028,14 @@ function NowPlayingScreen({
         </div>
         <span className="volume-label" style={{ textAlign: 'right' }}>🔊</span>
       </div>
-    </div>
-  );
-}
 
-// ── Settings screen ────────────────────────────────────────
-
-function SettingsScreen({ volume }: { volume: number }) {
-  return (
-    <div className="settings-screen">
-      <div className="settings-item">
-        <span>Volume</span>
-        <span>{volume}%</span>
-      </div>
-      <div className="settings-item">
-        <span>About</span>
-        <span style={{ fontSize: '9px', color: '#888' }}>OldPod.fm v1.0</span>
-      </div>
+      {playerError ? (
+        <div className="np-hint np-hint--error">{playerError}</div>
+      ) : (
+        <div className="np-hint">
+          {!isPlayerReady ? 'Play a song to connect audio' : 'Center · Lyrics'}
+        </div>
+      )}
     </div>
   );
 }
