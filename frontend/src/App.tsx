@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ClickWheel from './components/ClickWheel';
 import LyricsScreen from './components/LyricsScreen';
 import SearchScreen, { SEARCH_KEYS } from './components/SearchScreen';
 import { useSpotifyPlayer } from './hooks/useSpotifyPlayer';
+import { useAudioPlayer } from './hooks/useAudioPlayer';
 import {
   albumArtPlaceholder,
   createMockService,
@@ -10,6 +11,7 @@ import {
   describeDataError,
   formatTime,
 } from './services/spotify';
+import { createAudiusService } from './services/audius';
 import type {
   Album,
   Artist,
@@ -31,7 +33,7 @@ import {
   redirectToSpotifyLogin,
 } from './services/auth';
 import { fetchLyrics, type TrackLyrics } from './services/lyrics';
-import { PROVIDERS } from './services/providers/registry';
+import { getProviderMeta, PROVIDERS } from './services/providers/registry';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -58,8 +60,15 @@ interface NavEntry {
 }
 
 const MAIN_MENU = ['Music', 'Search', 'Now Playing', 'Sources', 'Settings'];
-const MUSIC_MENU = ['Playlists', 'Albums', 'Artists', 'Recently Played'];
 const ARTIST_MENU = ['Top Tracks', 'Albums'];
+
+// The Music submenu is built from the active source's capabilities (see
+// `musicMenuItems`); `kind` maps a row to its loader in `doSelect`.
+type MusicMenuKind = 'playlists' | 'albums' | 'artists' | 'recent' | 'trending';
+interface MusicMenuEntry {
+  label: string;
+  kind: MusicMenuKind;
+}
 const SETTINGS_MENU = ['Shuffle', 'Repeat', 'Theme', 'About', 'Sign Out'];
 
 const REPEAT_ORDER: RepeatMode[] = ['off', 'context', 'track'];
@@ -148,13 +157,21 @@ export default function App() {
     if (getStoredToken() || localStorage.getItem('spot_refresh')) return false;
     return localStorage.getItem('demo_mode') === '1';
   });
+  // Audius is a login-less source; remember it across reloads like demo mode.
+  const [isAudiusMode, setIsAudiusMode] = useState(() => {
+    if (getStoredToken() || localStorage.getItem('spot_refresh')) return false;
+    return localStorage.getItem('source') === 'audius';
+  });
   const [dataError, setDataError] = useState<string | null>(null);
 
   // Service
   const [service, setService] = useState<ActiveMusicService | null>(null);
 
   // Which source is currently active (drives the Sources screen highlight).
-  const activeProviderId: ProviderId = service?.meta.id ?? (isDemoMode ? 'demo' : 'spotify');
+  const activeProviderId: ProviderId =
+    service?.meta.id ?? (isDemoMode ? 'demo' : isAudiusMode ? 'audius' : 'spotify');
+  const isAudius = activeProviderId === 'audius';
+  const isSpotify = activeProviderId === 'spotify';
 
   // Data
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -217,6 +234,12 @@ export default function App() {
     volumeControllable,
   } = useSpotifyPlayer(accessToken);
 
+  // HTML5 <audio> player (Audius and other DRM-free sources). The end-of-track
+  // handler advances the queue and is wired via a ref so the hook keeps a
+  // stable callback while still seeing fresh shuffle/repeat/index state.
+  const audiusEndedRef = useRef<() => void>(() => {});
+  const audio = useAudioPlayer(useCallback(() => audiusEndedRef.current(), []));
+
   const resolveSpotifyToken = useCallback(async (): Promise<string | null> => {
     let token = getStoredToken();
     if (!token) token = await refreshAccessToken();
@@ -231,7 +254,7 @@ export default function App() {
   // visible. iOS is hardware-locked (volumeControllable = false), so we leave
   // the bar alone there and show a device-controlled hint instead.
   useEffect(() => {
-    if (isDemoMode || !volumeControllable || currentScreen !== 'nowPlaying') return;
+    if (!isSpotify || !volumeControllable || currentScreen !== 'nowPlaying') return;
     let active = true;
     const sync = async () => {
       const v = await getDeviceVolume();
@@ -243,7 +266,12 @@ export default function App() {
       active = false;
       window.clearInterval(id);
     };
-  }, [isDemoMode, volumeControllable, currentScreen, getDeviceVolume]);
+  }, [isSpotify, volumeControllable, currentScreen, getDeviceVolume]);
+
+  // Keep the Audius <audio> element's volume in sync with the volume bar.
+  useEffect(() => {
+    if (isAudius) audio.setVolume(volume);
+  }, [isAudius, volume, audio]);
 
   // ── Init service + session bootstrap ─────────────────────
 
@@ -252,11 +280,15 @@ export default function App() {
       setService(createMockService());
       return;
     }
+    if (isAudiusMode) {
+      setService(createAudiusService());
+      return;
+    }
     setService(createSpotifyService(resolveSpotifyToken));
-  }, [isDemoMode, resolveSpotifyToken]);
+  }, [isDemoMode, isAudiusMode, resolveSpotifyToken]);
 
   useEffect(() => {
-    if (isDemoMode) {
+    if (isDemoMode || isAudiusMode) {
       if (nav[0]?.screen === 'login') setNav([{ screen: 'mainMenu', index: 0 }]);
       return;
     }
@@ -265,7 +297,7 @@ export default function App() {
         setNav([{ screen: 'mainMenu', index: 0 }]);
       }
     });
-  }, [isDemoMode, resolveSpotifyToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isDemoMode, isAudiusMode, resolveSpotifyToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Handle PKCE callback (?code=...) ────────────────────
 
@@ -292,12 +324,20 @@ export default function App() {
   // ── SDK state sync (real mode) ───────────────────────────
 
   useEffect(() => {
-    if (!sdkState || isDemoMode) return;
+    if (!sdkState || !isSpotify) return;
     setIsPlaying(sdkState.isPlaying);
     // Don't clobber the user's scrub position with an in-flight SDK echo.
     if (Date.now() >= scrubbingUntilRef.current) setPositionMs(sdkState.positionMs);
     if (sdkState.track) setCurrentTrack(sdkState.track);
-  }, [sdkState, isDemoMode]);
+  }, [sdkState, isSpotify]);
+
+  // ── Audius (<audio>) state sync ──────────────────────────
+
+  useEffect(() => {
+    if (!isAudius) return;
+    setIsPlaying(audio.audioState.isPlaying);
+    if (Date.now() >= scrubbingUntilRef.current) setPositionMs(audio.audioState.positionMs);
+  }, [isAudius, audio.audioState]);
 
   // ── Demo mode position timer ─────────────────────────────
 
@@ -478,6 +518,25 @@ export default function App() {
     }
   }, [service]);
 
+  // Audius has no listening history; "Trending" is its default browse list.
+  const loadTrending = useCallback(async () => {
+    if (!service?.getTrending) return;
+    setIsLoading(true);
+    setDataError(null);
+    setTracks([]);
+    setTracksTitle('Trending');
+    try {
+      const data = await service.getTrending();
+      setTracks(data);
+      setTrackSource({ uris: data.map((t) => t.uri) });
+      if (data.length === 0) setDataError('No trending tracks');
+    } catch (e) {
+      setDataError(describeDataError(e, 'Could not load trending'));
+    } finally {
+      setIsLoading(false);
+    }
+  }, [service]);
+
   const runSearch = useCallback(
     async (query: string) => {
       if (!service) return;
@@ -501,6 +560,14 @@ export default function App() {
 
   // ── Playback controls ─────────────────────────────────────
 
+  // Audius plays its stream URL (Track.uri) through the HTML5 audio element.
+  const playAudiusTrack = useCallback(
+    async (track: Track) => {
+      await audio.loadAndPlay(track.uri);
+    },
+    [audio]
+  );
+
   const playFromList = useCallback(
     async (trackList: Track[], idx: number, source: PlaySource) => {
       const track = trackList[idx];
@@ -510,6 +577,11 @@ export default function App() {
       setCurrentTrackIndex(idx);
       setPositionMs(0);
       setIsPlaying(true);
+      if (isAudius) {
+        await playAudiusTrack(track);
+        return;
+      }
+      // Demo mode is driven by the simulated position timer; Spotify by the SDK.
       if (!isDemoMode && service) {
         try {
           await activatePlayback();
@@ -519,7 +591,7 @@ export default function App() {
         }
       }
     },
-    [isDemoMode, service, activatePlayback, runWithDevice]
+    [isAudius, playAudiusTrack, isDemoMode, service, activatePlayback, runWithDevice]
   );
 
   // Start a context (playlist/album) without a known track list — relies on the
@@ -542,6 +614,11 @@ export default function App() {
   const togglePlay = useCallback(async () => {
     const next = !isPlaying;
     setIsPlaying(next);
+    if (isAudius) {
+      if (next) await audio.resume();
+      else audio.pause();
+      return;
+    }
     if (!isDemoMode && service) {
       try {
         await activatePlayback();
@@ -550,16 +627,20 @@ export default function App() {
         setIsPlaying(!next);
       }
     }
-  }, [isPlaying, isDemoMode, service, activatePlayback, runWithDevice]);
+  }, [isPlaying, isAudius, audio, isDemoMode, service, activatePlayback, runWithDevice]);
 
   const skipNext = useCallback(async () => {
     const list = playingTracksRef.current;
     const nextIdx = pickNextIndex(currentTrackIndex, list.length, shuffle);
-    if (nextIdx < list.length) {
-      const next = list[nextIdx];
-      setCurrentTrack(next);
+    const nextTrack = nextIdx < list.length ? list[nextIdx] : null;
+    if (nextTrack) {
+      setCurrentTrack(nextTrack);
       setCurrentTrackIndex(nextIdx);
       setPositionMs(0);
+    }
+    if (isAudius) {
+      if (nextTrack) await playAudiusTrack(nextTrack);
+      return;
     }
     if (!isDemoMode && service) {
       try {
@@ -569,12 +650,16 @@ export default function App() {
         /* keep UI state */
       }
     }
-  }, [currentTrackIndex, shuffle, isDemoMode, service, activatePlayback, runWithDevice]);
+  }, [currentTrackIndex, shuffle, isAudius, playAudiusTrack, isDemoMode, service, activatePlayback, runWithDevice]);
 
   const skipPrev = useCallback(async () => {
     const list = playingTracksRef.current;
     if (positionMs > 3000 || currentTrackIndex === 0) {
       setPositionMs(0);
+      if (isAudius) {
+        audio.seek(0);
+        return;
+      }
       if (!isDemoMode && service) {
         try {
           await activatePlayback();
@@ -585,9 +670,14 @@ export default function App() {
       }
     } else {
       const prevIdx = currentTrackIndex - 1;
-      setCurrentTrack(list[prevIdx]);
+      const prevTrack = list[prevIdx];
+      setCurrentTrack(prevTrack);
       setCurrentTrackIndex(prevIdx);
       setPositionMs(0);
+      if (isAudius) {
+        if (prevTrack) await playAudiusTrack(prevTrack);
+        return;
+      }
       if (!isDemoMode && service) {
         try {
           await activatePlayback();
@@ -597,18 +687,54 @@ export default function App() {
         }
       }
     }
-  }, [currentTrackIndex, positionMs, isDemoMode, service, activatePlayback, runWithDevice]);
+  }, [currentTrackIndex, positionMs, isAudius, audio, playAudiusTrack, isDemoMode, service, activatePlayback, runWithDevice]);
+
+  // When an Audius track ends, advance the queue using the same repeat/shuffle
+  // rules as demo mode. Kept in a ref so the audio hook's `ended` listener
+  // always runs the latest logic without re-subscribing.
+  useEffect(() => {
+    audiusEndedRef.current = () => {
+      const list = playingTracksRef.current;
+      if (repeat === 'track') {
+        const t = list[currentTrackIndex] ?? currentTrack;
+        if (t) void playAudiusTrack(t);
+        return;
+      }
+      const nextIdx = pickNextIndex(currentTrackIndex, list.length, shuffle);
+      if (nextIdx < list.length) {
+        const next = list[nextIdx];
+        setCurrentTrack(next);
+        setCurrentTrackIndex(nextIdx);
+        setPositionMs(0);
+        void playAudiusTrack(next);
+        return;
+      }
+      if (repeat === 'context' && list.length > 0) {
+        const first = list[0];
+        setCurrentTrack(first);
+        setCurrentTrackIndex(0);
+        setPositionMs(0);
+        void playAudiusTrack(first);
+        return;
+      }
+      setIsPlaying(false);
+    };
+  }, [repeat, shuffle, currentTrackIndex, currentTrack, playAudiusTrack]);
 
   const adjustVolume = useCallback(
     (delta: number) => {
       const newVol = Math.max(0, Math.min(100, volume + delta));
       setVolume(newVol);
+      if (isAudius) {
+        audio.setVolume(newVol);
+        return;
+      }
       if (!isDemoMode && service && deviceId) {
         void service.setVolume(newVol, deviceId);
         setPlayerVolume(newVol);
       }
     },
-    [volume, isDemoMode, service, deviceId, setPlayerVolume]
+    [volume, isAudius, audio, isDemoMode, service, deviceId, setPlayerVolume]
   );
 
   // Scrub the current track. Each wheel tick nudges the position; the real
@@ -622,6 +748,10 @@ export default function App() {
       positionRef.current = target;
       setPositionMs(target);
       scrubbingUntilRef.current = Date.now() + 900;
+      if (isAudius) {
+        audio.seek(target);
+        return;
+      }
       if (isDemoMode || !service) return;
       if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
       seekTimerRef.current = window.setTimeout(() => {
@@ -635,7 +765,7 @@ export default function App() {
         })();
       }, 250);
     },
-    [currentTrack, isDemoMode, service, activatePlayback, runWithDevice]
+    [currentTrack, isAudius, audio, isDemoMode, service, activatePlayback, runWithDevice]
   );
 
   // ── Settings toggles ─────────────────────────────────────
@@ -658,8 +788,12 @@ export default function App() {
 
   const signOut = useCallback(() => {
     logout();
+    localStorage.removeItem('demo_mode');
+    localStorage.removeItem('source');
+    audio.stop();
     setAccessToken(null);
     setIsDemoMode(false);
+    setIsAudiusMode(false);
     setService(null);
     setPlaylists([]);
     setAlbums([]);
@@ -672,7 +806,7 @@ export default function App() {
     setPositionMs(0);
     setDataError(null);
     setNav([{ screen: 'login', index: 0 }]);
-  }, []);
+  }, [audio]);
 
   // ── Lyrics ────────────────────────────────────────────────
 
@@ -724,6 +858,52 @@ export default function App() {
     [submitSearch, searchQuery]
   );
 
+  // ── Capability-driven Music submenu ──────────────────────
+
+  // Build the Music submenu from the active source's capabilities so library-
+  // only entries vanish for sources that lack them (Audius: no library/artists,
+  // so only "Trending" — its default browse list — appears).
+  const musicMenuItems = useMemo<MusicMenuEntry[]>(() => {
+    const caps = getProviderMeta(activeProviderId)?.capabilities;
+    const items: MusicMenuEntry[] = [];
+    if (caps?.hasLibrary) {
+      items.push({ label: 'Playlists', kind: 'playlists' });
+      items.push({ label: 'Albums', kind: 'albums' });
+    }
+    if (caps?.hasArtists) items.push({ label: 'Artists', kind: 'artists' });
+    if (caps?.hasLibrary) items.push({ label: 'Recently Played', kind: 'recent' });
+    if (service?.getTrending) items.push({ label: 'Trending', kind: 'trending' });
+    return items;
+  }, [activeProviderId, service]);
+
+  // Switch to a login-less source (demo/audius), resetting any current playback.
+  const switchSource = useCallback(
+    (target: 'demo' | 'audius') => {
+      audio.stop();
+      setCurrentTrack(null);
+      setIsPlaying(false);
+      setPositionMs(0);
+      setDataError(null);
+      setTracks([]);
+      setTrackSource(null);
+      if (target === 'demo') {
+        localStorage.setItem('demo_mode', '1');
+        localStorage.removeItem('source');
+        setIsAudiusMode(false);
+        setIsDemoMode(true);
+        setService(createMockService());
+      } else {
+        localStorage.setItem('source', 'audius');
+        localStorage.removeItem('demo_mode');
+        setIsDemoMode(false);
+        setIsAudiusMode(true);
+        setService(createAudiusService());
+      }
+      setNav([{ screen: 'mainMenu', index: 0 }]);
+    },
+    [audio]
+  );
+
   // ── Select action (takes explicit index to avoid stale closure) ──
 
   const doSelect = useCallback(
@@ -755,39 +935,53 @@ export default function App() {
         case 'sources': {
           const p = PROVIDERS[idx];
           if (!p) break;
-          if (p.status === 'planned') {
+          if (p.id === activeProviderId) {
+            setNav([{ screen: 'mainMenu', index: 0 }]);
+          } else if (p.status === 'planned') {
             setDataError(`${p.label} — ${p.blurb}`);
           } else if (p.id === 'demo') {
-            if (!isDemoMode) {
-              localStorage.setItem('demo_mode', '1');
-              setIsDemoMode(true);
-              setAccessToken(null);
-              setService(createMockService());
-            }
-            setNav([{ screen: 'mainMenu', index: 0 }]);
+            switchSource('demo');
+          } else if (p.id === 'audius') {
+            switchSource('audius');
           } else if (p.id === 'spotify') {
             if (accessToken) {
-              setDataError('Already signed in to Spotify.');
+              // Already authenticated — switch the active service back to Spotify.
+              localStorage.removeItem('demo_mode');
+              localStorage.removeItem('source');
+              audio.stop();
+              setCurrentTrack(null);
+              setIsPlaying(false);
+              setPositionMs(0);
+              setIsDemoMode(false);
+              setIsAudiusMode(false);
+              setService(createSpotifyService(resolveSpotifyToken));
+              setNav([{ screen: 'mainMenu', index: 0 }]);
             } else {
               setIsDemoMode(false);
+              setIsAudiusMode(false);
               redirectToSpotifyLogin();
             }
           }
           break;
         }
         case 'music': {
-          if (idx === 0) {
+          const item = musicMenuItems[idx];
+          if (!item) break;
+          if (item.kind === 'playlists') {
             push('playlists');
             void loadPlaylists();
-          } else if (idx === 1) {
+          } else if (item.kind === 'albums') {
             push('albums');
             void loadAlbums();
-          } else if (idx === 2) {
+          } else if (item.kind === 'artists') {
             push('artists');
             void loadArtists();
-          } else if (idx === 3) {
+          } else if (item.kind === 'recent') {
             push('tracks');
             void loadRecentlyPlayed();
+          } else if (item.kind === 'trending') {
+            push('tracks');
+            void loadTrending();
           }
           break;
         }
@@ -859,8 +1053,9 @@ export default function App() {
       currentScreen, push, playlists, albums, artists, selectedArtist, tracks, trackSource,
       loadPlaylists, loadAlbums, loadArtists, loadArtistAlbums, loadArtistTopTracks,
       loadPlaylistTracks, loadAlbumTracks,
-      loadRecentlyPlayed, playFromList, playContext, openLyrics, toggleShuffle,
-      cycleRepeat, toggleTheme, signOut, handleSearchKey, isDemoMode, accessToken,
+      loadRecentlyPlayed, loadTrending, playFromList, playContext, openLyrics, toggleShuffle,
+      cycleRepeat, toggleTheme, signOut, handleSearchKey, accessToken,
+      activeProviderId, musicMenuItems, switchSource, audio, resolveSpotifyToken,
     ]
   );
 
@@ -895,7 +1090,7 @@ export default function App() {
     // be deps so the wheel sees freshly-loaded lists (else it clamps to length 0).
     [
       currentScreen, seekBy, moveSelection, lyrics,
-      playlists, albums, artists, tracks, trackSource,
+      playlists, albums, artists, tracks, trackSource, musicMenuItems,
     ]
   );
 
@@ -916,7 +1111,7 @@ export default function App() {
     switch (screen) {
       case 'login': return 2;
       case 'mainMenu': return MAIN_MENU.length;
-      case 'music': return MUSIC_MENU.length;
+      case 'music': return musicMenuItems.length;
       case 'settings': return SETTINGS_MENU.length;
       case 'sources': return PROVIDERS.length;
       case 'playlists': return playlists.length;
@@ -954,7 +1149,7 @@ export default function App() {
                   screen={currentScreen}
                   selectedIndex={selectedIndex}
                   mainMenu={MAIN_MENU}
-                  musicMenu={MUSIC_MENU}
+                  musicMenu={musicMenuItems.map((m) => m.label)}
                   playlists={playlists}
                   albums={albums}
                   artists={artists}
@@ -963,12 +1158,12 @@ export default function App() {
                   isPlaying={isPlaying}
                   positionMs={positionMs}
                   volume={volume}
-                  volumeControllable={volumeControllable}
+                  volumeControllable={isAudius ? audio.volumeControllable : volumeControllable}
                   shuffle={shuffle}
                   repeat={repeat}
                   theme={theme}
-                  isPlayerReady={isReady}
-                  playerError={playerError}
+                  isPlayerReady={isAudius ? true : isReady}
+                  playerError={isAudius ? audio.audioError : playerError}
                   searchQuery={searchQuery}
                   dataError={dataError}
                   activeProviderId={activeProviderId}

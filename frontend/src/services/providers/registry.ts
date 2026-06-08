@@ -37,8 +37,8 @@ export const PROVIDERS: ProviderMeta[] = [
   {
     id: 'audius',
     label: 'Audius',
-    blurb: 'Free & open — no login (coming soon)',
-    status: 'planned',
+    blurb: 'Free & open — no login, indie catalog',
+    status: 'ready',
     capabilities: {
       needsLogin: false,
       needsPremiumForPlayback: false,

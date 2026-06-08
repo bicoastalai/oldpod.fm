@@ -91,6 +91,9 @@ export interface MusicProvider {
   getAlbumTracks(album: Album): Promise<Track[]>;
   getRecentlyPlayed(): Promise<Track[]>;
   search(query: string): Promise<Track[]>;
+  // Optional default browse list (e.g. Audius "Trending"). Present when a
+  // source has no personal library but can surface a curated/popular feed.
+  getTrending?(): Promise<Track[]>;
   // Optional artist browsing — present only when capabilities.hasArtists.
   getArtists?(): Promise<Artist[]>;
   getArtistAlbums?(artist: Artist): Promise<Album[]>;
