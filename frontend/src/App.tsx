@@ -642,19 +642,7 @@ export default function App() {
   // ── Render ────────────────────────────────────────────────
 
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        background:
-          theme === 'black'
-            ? 'radial-gradient(ellipse at center, #3a3a3a 0%, #1a1a1a 100%)'
-            : 'radial-gradient(ellipse at center, #c8c8c8 0%, #909090 100%)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '24px',
-      }}
-    >
+    <div className={`app-shell app-shell--${theme}`}>
       <div className={`ipod${theme === 'black' ? ' ipod-black' : ''}`}>
         {/* Screen */}
         <div className="ipod-bezel">

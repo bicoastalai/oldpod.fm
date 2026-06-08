@@ -6,13 +6,96 @@
   box-sizing: border-box;
 }
 
+html {
+  height: 100%;
+}
+
 body {
   font-family: 'Inter', system-ui, sans-serif;
   background: #b0b0b0;
+  margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+#app {
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* ── App shell (centers iPod; full-screen on phones) ── */
+.app-shell {
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: radial-gradient(ellipse at center, #c8c8c8 0%, #909090 100%);
+}
+
+.app-shell--black {
+  background: radial-gradient(ellipse at center, #3a3a3a 0%, #1a1a1a 100%);
+}
+
+/* Phones / narrow touch screens: scale iPod to fill the viewport */
+@media (max-width: 768px), (pointer: coarse) and (max-height: 932px) {
+  body {
+    align-items: stretch;
+    overflow: hidden;
+  }
+
+  .app-shell {
+    min-height: 100dvh;
+    min-height: 100svh;
+    height: 100dvh;
+    height: 100svh;
+    padding:
+      max(4px, env(safe-area-inset-top))
+      max(4px, env(safe-area-inset-right))
+      max(4px, env(safe-area-inset-bottom))
+      max(4px, env(safe-area-inset-left));
+    overflow: hidden;
+  }
+
+  .app-shell .ipod {
+    flex-shrink: 0;
+    transform: scale(var(--ipod-fit-scale, 1));
+    transform-origin: center center;
+  }
+
+  /* Layout size of each theme (width × height) used only for scaling math */
+  .app-shell--white .ipod {
+    --ipod-layout-w: 304px;
+    --ipod-layout-h: 434px;
+  }
+
+  .app-shell--black .ipod {
+    --ipod-layout-w: 308px;
+    --ipod-layout-h: 462px;
+  }
+
+  .app-shell .ipod {
+    --ipod-fit-scale: min(
+      calc(
+        (100vw - env(safe-area-inset-left) - env(safe-area-inset-right) - 8px) /
+          var(--ipod-layout-w)
+      ),
+      calc(
+        (100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 8px) /
+          var(--ipod-layout-h)
+      ),
+      calc(
+        (100svh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 8px) /
+          var(--ipod-layout-h)
+      )
+    );
+  }
 }
 
 /* ── iPod shell ── */
