@@ -56,10 +56,10 @@ body {
     height: 100dvh;
     height: 100svh;
     padding:
-      max(4px, env(safe-area-inset-top))
-      max(4px, env(safe-area-inset-right))
-      max(4px, env(safe-area-inset-bottom))
-      max(4px, env(safe-area-inset-left));
+      max(2px, env(safe-area-inset-top))
+      max(2px, env(safe-area-inset-right))
+      max(2px, env(safe-area-inset-bottom))
+      max(2px, env(safe-area-inset-left));
     overflow: hidden;
   }
 
@@ -83,15 +83,15 @@ body {
   .app-shell .ipod {
     --ipod-fit-scale: min(
       calc(
-        (100vw - env(safe-area-inset-left) - env(safe-area-inset-right) - 8px) /
+        (100vw - env(safe-area-inset-left) - env(safe-area-inset-right) - 4px) /
           var(--ipod-layout-w)
       ),
       calc(
-        (100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 8px) /
+        (100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 4px) /
           var(--ipod-layout-h)
       ),
       calc(
-        (100svh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 8px) /
+        (100svh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 4px) /
           var(--ipod-layout-h)
       )
     );
