@@ -7,6 +7,7 @@ import {
   albumArtPlaceholder,
   createMockService,
   createSpotifyService,
+  describeDataError,
   formatTime,
   Album,
   Playlist,
@@ -318,7 +319,7 @@ export default function App() {
       setPlaylists(await service.getPlaylists());
     } catch (e) {
       setPlaylists([]);
-      setDataError(e instanceof Error ? e.message : 'Could not load playlists');
+      setDataError(describeDataError(e, 'Could not load playlists'));
     } finally {
       setIsLoading(false);
     }
@@ -332,7 +333,7 @@ export default function App() {
       setAlbums(await service.getAlbums());
     } catch (e) {
       setAlbums([]);
-      setDataError(e instanceof Error ? e.message : 'Could not load albums');
+      setDataError(describeDataError(e, 'Could not load albums'));
     } finally {
       setIsLoading(false);
     }
@@ -356,7 +357,7 @@ export default function App() {
           );
         }
       } catch (e) {
-        setDataError(e instanceof Error ? e.message : 'Could not load songs');
+        setDataError(describeDataError(e, 'Could not load songs'));
       } finally {
         setIsLoading(false);
       }
@@ -375,7 +376,7 @@ export default function App() {
       try {
         setTracks(await service.getAlbumTracks(album));
       } catch (e) {
-        setDataError(e instanceof Error ? e.message : 'Could not load album');
+        setDataError(describeDataError(e, 'Could not load album'));
       } finally {
         setIsLoading(false);
       }
@@ -394,7 +395,7 @@ export default function App() {
       setTracks(data);
       setTrackSource({ uris: data.map((t) => t.uri) });
     } catch (e) {
-      setDataError(e instanceof Error ? e.message : 'Could not load recently played');
+      setDataError(describeDataError(e, 'Could not load recently played'));
     } finally {
       setIsLoading(false);
     }
@@ -413,7 +414,7 @@ export default function App() {
         setTrackSource({ uris: data.map((t) => t.uri) });
         if (data.length === 0) setDataError('No results');
       } catch (e) {
-        setDataError(e instanceof Error ? e.message : 'Search failed');
+        setDataError(describeDataError(e, 'Search failed'));
       } finally {
         setIsLoading(false);
       }

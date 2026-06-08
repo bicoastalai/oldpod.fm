@@ -427,6 +427,26 @@ export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifySer
   };
 }
 
+/**
+ * Turn a caught data-load error into a message a non-technical visitor can act
+ * on. The common case is a 403 when the app is in Spotify "Development Mode"
+ * and the signed-in account isn't on the 25-user allowlist.
+ */
+export function describeDataError(e: unknown, fallback: string): string {
+  if (e instanceof SpotifyApiError) {
+    if (e.status === 403) {
+      return "This app is in Spotify's limited-access mode. Ask the owner to add your Spotify account email to the allowlist, then sign in again.";
+    }
+    if (e.status === 401) {
+      return 'Your Spotify session expired — sign out and sign in again.';
+    }
+    if (e.status === 429) {
+      return 'Spotify is rate-limiting requests — wait a moment and try again.';
+    }
+  }
+  return e instanceof Error ? e.message : fallback;
+}
+
 export function albumArtPlaceholder(seed: string): string {
   const colors = [
     '#c0392b', '#e74c3c', '#e67e22', '#f39c12',
