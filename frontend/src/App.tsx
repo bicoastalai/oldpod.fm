@@ -10,6 +10,7 @@ import {
   describeDataError,
   formatTime,
   Album,
+  Artist,
   Playlist,
   PlaySource,
   RepeatMode,
@@ -36,6 +37,8 @@ type Screen =
   | 'music'
   | 'playlists'
   | 'albums'
+  | 'artists'
+  | 'artist'
   | 'tracks'
   | 'nowPlaying'
   | 'lyrics'
@@ -51,7 +54,8 @@ interface NavEntry {
 }
 
 const MAIN_MENU = ['Music', 'Search', 'Now Playing', 'Sources', 'Settings'];
-const MUSIC_MENU = ['Playlists', 'Albums', 'Recently Played'];
+const MUSIC_MENU = ['Playlists', 'Albums', 'Artists', 'Recently Played'];
+const ARTIST_MENU = ['Top Tracks', 'Albums'];
 const SETTINGS_MENU = ['Shuffle', 'Repeat', 'Theme', 'About'];
 
 const REPEAT_ORDER: RepeatMode[] = ['off', 'context', 'track'];
@@ -62,6 +66,8 @@ const SCREEN_TITLES: Record<Screen, string> = {
   music: 'Music',
   playlists: 'Playlists',
   albums: 'Albums',
+  artists: 'Artists',
+  artist: 'Artist',
   tracks: 'Songs',
   nowPlaying: 'Now Playing',
   lyrics: 'Lyrics',
@@ -147,6 +153,8 @@ export default function App() {
   // Data
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [albums, setAlbums] = useState<Album[]>([]);
+  const [artists, setArtists] = useState<Artist[]>([]);
+  const [selectedArtist, setSelectedArtist] = useState<Artist | null>(null);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [trackSource, setTrackSource] = useState<PlaySource | null>(null);
   const [tracksTitle, setTracksTitle] = useState('Songs');
@@ -384,6 +392,62 @@ export default function App() {
         setTracks(await service.getAlbumTracks(album));
       } catch (e) {
         setDataError(describeDataError(e, 'Could not load album'));
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [service]
+  );
+
+  const loadArtists = useCallback(async () => {
+    if (!service) return;
+    setIsLoading(true);
+    setDataError(null);
+    try {
+      const data = await service.getArtists();
+      setArtists(data);
+      if (data.length === 0) setDataError('No followed or top artists');
+    } catch (e) {
+      setArtists([]);
+      setDataError(describeDataError(e, 'Could not load artists'));
+    } finally {
+      setIsLoading(false);
+    }
+  }, [service]);
+
+  const loadArtistAlbums = useCallback(
+    async (artist: Artist) => {
+      if (!service) return;
+      setIsLoading(true);
+      setDataError(null);
+      setAlbums([]);
+      try {
+        const data = await service.getArtistAlbums(artist);
+        setAlbums(data);
+        if (data.length === 0) setDataError('No albums');
+      } catch (e) {
+        setDataError(describeDataError(e, 'Could not load albums'));
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [service]
+  );
+
+  const loadArtistTopTracks = useCallback(
+    async (artist: Artist) => {
+      if (!service) return;
+      setIsLoading(true);
+      setDataError(null);
+      setTracks([]);
+      setTracksTitle(artist.name);
+      try {
+        const data = await service.getArtistTopTracks(artist);
+        setTracks(data);
+        setTrackSource({ uris: data.map((t) => t.uri) });
+        if (data.length === 0) setDataError('No top tracks');
+      } catch (e) {
+        setDataError(describeDataError(e, 'Could not load top tracks'));
       } finally {
         setIsLoading(false);
       }
@@ -695,8 +759,31 @@ export default function App() {
             push('albums');
             void loadAlbums();
           } else if (idx === 2) {
+            push('artists');
+            void loadArtists();
+          } else if (idx === 3) {
             push('tracks');
             void loadRecentlyPlayed();
+          }
+          break;
+        }
+        case 'artists': {
+          const ar = artists[idx];
+          if (ar) {
+            setSelectedArtist(ar);
+            setDataError(null);
+            push('artist');
+          }
+          break;
+        }
+        case 'artist': {
+          if (!selectedArtist) break;
+          if (idx === 0) {
+            push('tracks');
+            void loadArtistTopTracks(selectedArtist);
+          } else if (idx === 1) {
+            push('albums');
+            void loadArtistAlbums(selectedArtist);
           }
           break;
         }
@@ -744,8 +831,9 @@ export default function App() {
       }
     },
     [
-      currentScreen, push, playlists, albums, tracks, trackSource,
-      loadPlaylists, loadAlbums, loadPlaylistTracks, loadAlbumTracks,
+      currentScreen, push, playlists, albums, artists, selectedArtist, tracks, trackSource,
+      loadPlaylists, loadAlbums, loadArtists, loadArtistAlbums, loadArtistTopTracks,
+      loadPlaylistTracks, loadAlbumTracks,
       loadRecentlyPlayed, playFromList, playContext, openLyrics, toggleShuffle,
       cycleRepeat, toggleTheme, handleSearchKey, isDemoMode, accessToken,
     ]
@@ -782,7 +870,7 @@ export default function App() {
     // be deps so the wheel sees freshly-loaded lists (else it clamps to length 0).
     [
       currentScreen, seekBy, moveSelection, lyrics,
-      playlists, albums, tracks, trackSource,
+      playlists, albums, artists, tracks, trackSource,
     ]
   );
 
@@ -808,6 +896,8 @@ export default function App() {
       case 'sources': return PROVIDERS.length;
       case 'playlists': return playlists.length;
       case 'albums': return albums.length;
+      case 'artists': return artists.length;
+      case 'artist': return ARTIST_MENU.length;
       case 'tracks':
         // Empty list + a context still offers one selectable "Play" row.
         if (tracks.length === 0 && trackSource && 'contextUri' in trackSource) return 1;
@@ -842,6 +932,7 @@ export default function App() {
                   musicMenu={MUSIC_MENU}
                   playlists={playlists}
                   albums={albums}
+                  artists={artists}
                   tracks={tracks}
                   currentTrack={currentTrack}
                   isPlaying={isPlaying}
@@ -885,6 +976,7 @@ interface ScreenProps {
   musicMenu: string[];
   playlists: Playlist[];
   albums: Album[];
+  artists: Artist[];
   tracks: Track[];
   currentTrack: Track | null;
   isPlaying: boolean;
@@ -941,6 +1033,23 @@ function ScreenContent(props: ScreenProps) {
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
           emptyLabel={props.dataError ?? 'No playlists'}
+        />
+      );
+    case 'artists':
+      return (
+        <MenuScreen
+          items={props.artists.map((a) => ({ label: a.name, arrow: true }))}
+          selectedIndex={selectedIndex}
+          onItemClick={onItemClick}
+          emptyLabel={props.dataError ?? 'No artists'}
+        />
+      );
+    case 'artist':
+      return (
+        <MenuScreen
+          items={ARTIST_MENU.map((label) => ({ label, arrow: true }))}
+          selectedIndex={selectedIndex}
+          onItemClick={onItemClick}
         />
       );
     case 'albums':

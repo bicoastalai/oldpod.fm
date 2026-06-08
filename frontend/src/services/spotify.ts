@@ -27,6 +27,13 @@ export interface Album {
   trackCount: number;
 }
 
+export interface Artist {
+  id: string;
+  uri: string;
+  name: string;
+  image: string | null;
+}
+
 export type RepeatMode = 'off' | 'context' | 'track';
 
 /**
@@ -41,6 +48,9 @@ export interface SpotifyService {
   getTracks(playlistId: string): Promise<Track[]>;
   getAlbums(): Promise<Album[]>;
   getAlbumTracks(album: Album): Promise<Track[]>;
+  getArtists(): Promise<Artist[]>;
+  getArtistAlbums(artist: Artist): Promise<Album[]>;
+  getArtistTopTracks(artist: Artist): Promise<Track[]>;
   getRecentlyPlayed(): Promise<Track[]>;
   search(query: string): Promise<Track[]>;
   play(source: PlaySource, trackIndex: number, deviceId: string): Promise<void>;
@@ -127,11 +137,24 @@ const MOCK_ALBUMS: Album[] = [
   { id: 'abbeyroad', uri: 'mock:album:abbeyroad', name: 'Abbey Road', artist: 'The Beatles', albumArt: null, trackCount: MOCK_ALBUM_TRACKS.abbeyroad.length },
 ];
 
+const MOCK_ARTISTS: Artist[] = [
+  { id: 'queen', uri: 'mock:artist:queen', name: 'Queen', image: null },
+  { id: 'mj', uri: 'mock:artist:mj', name: 'Michael Jackson', image: null },
+  { id: 'beatles', uri: 'mock:artist:beatles', name: 'The Beatles', image: null },
+  { id: 'fleetwood', uri: 'mock:artist:fleetwood', name: 'Fleetwood Mac', image: null },
+  { id: 'eminem', uri: 'mock:artist:eminem', name: 'Eminem', image: null },
+];
+
 function allMockTracks(): Track[] {
   return [
     ...Object.values(MOCK_TRACKS).flat(),
     ...Object.values(MOCK_ALBUM_TRACKS).flat(),
   ];
+}
+
+function mockTracksByArtist(name: string): Track[] {
+  const n = name.toLowerCase();
+  return allMockTracks().filter((t) => t.artist.toLowerCase() === n);
 }
 
 function sleep(ms: number) {
@@ -155,6 +178,20 @@ export function createMockService(): SpotifyService {
     async getAlbumTracks(album) {
       await sleep(300);
       return MOCK_ALBUM_TRACKS[album.id] ?? [];
+    },
+    async getArtists() {
+      await sleep(250);
+      return MOCK_ARTISTS;
+    },
+    async getArtistAlbums(artist) {
+      await sleep(250);
+      return MOCK_ALBUMS.filter(
+        (a) => a.artist.toLowerCase() === artist.name.toLowerCase()
+      );
+    },
+    async getArtistTopTracks(artist) {
+      await sleep(250);
+      return mockTracksByArtist(artist.name);
     },
     async getRecentlyPlayed() {
       await sleep(250);
@@ -225,15 +262,24 @@ export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifySer
   // The current user's id is needed to know which playlists we can list
   // (Feb 2026: /playlists/{id}/items only works for owned/collaborative ones).
   let cachedUserId: string | null = null;
-  const getUserId = async (): Promise<string | null> => {
-    if (cachedUserId) return cachedUserId;
+  let cachedMarket: string | null = null;
+  const loadMe = async () => {
     try {
       const me = await request('/me');
       cachedUserId = me?.id ?? null;
+      cachedMarket = me?.country ?? null;
     } catch {
-      cachedUserId = null;
+      /* leave caches null */
     }
+  };
+  const getUserId = async (): Promise<string | null> => {
+    if (cachedUserId === null) await loadMe();
     return cachedUserId;
+  };
+  // Spotify's artist top-tracks endpoint requires a market; fall back to US.
+  const getMarket = async (): Promise<string> => {
+    if (cachedMarket === null) await loadMe();
+    return cachedMarket ?? 'US';
   };
 
   return {
@@ -321,6 +367,69 @@ export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifySer
           artist: t.artists?.[0]?.name ?? album.artist,
           album: album.name,
           albumArt: album.albumArt,
+          durationMs: t.duration_ms,
+        }));
+    },
+
+    async getArtists() {
+      // Merge followed artists with the user's top artists, deduped by id.
+      const [followed, top] = await Promise.all([
+        request('/me/following?type=artist&limit=50').catch(() => ({})),
+        request('/me/top/artists?limit=50').catch(() => ({})),
+      ]);
+      const rows = [
+        ...((followed as any).artists?.items ?? []),
+        ...((top as any).items ?? []),
+      ];
+      const seen = new Set<string>();
+      const out: Artist[] = [];
+      for (const a of rows) {
+        if (!a?.id || seen.has(a.id)) continue;
+        seen.add(a.id);
+        out.push({
+          id: a.id,
+          uri: a.uri ?? `spotify:artist:${a.id}`,
+          name: a.name,
+          image: a.images?.[0]?.url ?? null,
+        });
+      }
+      out.sort((a, b) => a.name.localeCompare(b.name));
+      return out;
+    },
+
+    async getArtistAlbums(artist) {
+      const data = await request(
+        `/artists/${artist.id}/albums?include_groups=album,single&limit=50`
+      );
+      const seen = new Set<string>();
+      return (data.items ?? [])
+        .filter((a: any) => {
+          if (!a?.id || seen.has(a.name)) return false;
+          seen.add(a.name);
+          return true;
+        })
+        .map((a: any) => ({
+          id: a.id,
+          uri: a.uri,
+          name: a.name,
+          artist: a.artists?.[0]?.name ?? artist.name,
+          albumArt: a.images?.[0]?.url ?? null,
+          trackCount: a.total_tracks ?? 0,
+        }));
+    },
+
+    async getArtistTopTracks(artist) {
+      const market = await getMarket();
+      const data = await request(`/artists/${artist.id}/top-tracks?market=${market}`);
+      return (data.tracks ?? [])
+        .filter((t: any) => t?.id)
+        .map((t: any) => ({
+          id: t.id,
+          uri: t.uri,
+          name: t.name,
+          artist: t.artists?.[0]?.name ?? artist.name,
+          album: t.album?.name ?? '',
+          albumArt: t.album?.images?.[0]?.url ?? null,
           durationMs: t.duration_ms,
         }));
     },

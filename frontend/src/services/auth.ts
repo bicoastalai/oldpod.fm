@@ -52,6 +52,9 @@ const SCOPES = [
   'user-read-playback-state',
   'user-modify-playback-state',
   'user-library-read',
+  'user-follow-read',
+  'user-top-read',
+  'user-read-recently-played',
 ].join(' ');
 
 // ── PKCE helpers ───────────────────────────────────────────

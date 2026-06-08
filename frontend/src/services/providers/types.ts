@@ -10,7 +10,7 @@
  * Media types live in `../spotify` for now and are re-exported here so callers
  * can import them from a source-neutral path.
  */
-export type { Track, Playlist, Album, PlaySource, RepeatMode } from '../spotify';
+export type { Track, Playlist, Album, Artist, PlaySource, RepeatMode } from '../spotify';
 
 export type ProviderId = 'demo' | 'spotify' | 'audius' | 'youtube' | 'radio';
 
@@ -21,6 +21,8 @@ export interface ProviderCapabilities {
   needsPremiumForPlayback: boolean;
   /** Exposes a personal library (playlists / albums / recently played). */
   hasLibrary: boolean;
+  /** Exposes artist browsing (followed/top artists → albums/top tracks). */
+  hasArtists: boolean;
   /** Supports text search. */
   hasSearch: boolean;
   /** Playback position can be seeked (false for live radio streams). */
@@ -49,4 +51,8 @@ export interface MusicProvider {
   getAlbumTracks(album: import('../spotify').Album): Promise<import('../spotify').Track[]>;
   getRecentlyPlayed(): Promise<import('../spotify').Track[]>;
   search(query: string): Promise<import('../spotify').Track[]>;
+  // Optional artist browsing — present only when capabilities.hasArtists.
+  getArtists?(): Promise<import('../spotify').Artist[]>;
+  getArtistAlbums?(artist: import('../spotify').Artist): Promise<import('../spotify').Album[]>;
+  getArtistTopTracks?(artist: import('../spotify').Artist): Promise<import('../spotify').Track[]>;
 }
