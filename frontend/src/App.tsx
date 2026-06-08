@@ -25,6 +25,8 @@ import {
   redirectToSpotifyLogin,
 } from './services/auth';
 import { fetchLyrics, type TrackLyrics } from './services/lyrics';
+import { PROVIDERS } from './services/providers/registry';
+import type { ProviderId } from './services/providers/types';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -38,6 +40,7 @@ type Screen =
   | 'nowPlaying'
   | 'lyrics'
   | 'settings'
+  | 'sources'
   | 'search';
 
 type Theme = 'light' | 'black';
@@ -47,7 +50,7 @@ interface NavEntry {
   index: number;
 }
 
-const MAIN_MENU = ['Music', 'Search', 'Now Playing', 'Settings'];
+const MAIN_MENU = ['Music', 'Search', 'Now Playing', 'Sources', 'Settings'];
 const MUSIC_MENU = ['Playlists', 'Albums', 'Recently Played'];
 const SETTINGS_MENU = ['Shuffle', 'Repeat', 'Theme', 'About'];
 
@@ -63,6 +66,7 @@ const SCREEN_TITLES: Record<Screen, string> = {
   nowPlaying: 'Now Playing',
   lyrics: 'Lyrics',
   settings: 'Settings',
+  sources: 'Sources',
   search: 'Search',
 };
 
@@ -136,6 +140,9 @@ export default function App() {
 
   // Service
   const [service, setService] = useState<SpotifyService | null>(null);
+
+  // Which source is currently active (drives the Sources screen highlight).
+  const activeProviderId: ProviderId = isDemoMode ? 'demo' : 'spotify';
 
   // Data
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -651,7 +658,33 @@ export default function App() {
           if (idx === 0) push('music');
           else if (idx === 1) push('search');
           else if (idx === 2) push('nowPlaying');
-          else if (idx === 3) push('settings');
+          else if (idx === 3) {
+            setDataError(null);
+            push('sources');
+          } else if (idx === 4) push('settings');
+          break;
+        }
+        case 'sources': {
+          const p = PROVIDERS[idx];
+          if (!p) break;
+          if (p.status === 'planned') {
+            setDataError(`${p.label} — ${p.blurb}`);
+          } else if (p.id === 'demo') {
+            if (!isDemoMode) {
+              localStorage.setItem('demo_mode', '1');
+              setIsDemoMode(true);
+              setAccessToken(null);
+              setService(createMockService());
+            }
+            setNav([{ screen: 'mainMenu', index: 0 }]);
+          } else if (p.id === 'spotify') {
+            if (accessToken) {
+              setDataError('Already signed in to Spotify.');
+            } else {
+              setIsDemoMode(false);
+              redirectToSpotifyLogin();
+            }
+          }
           break;
         }
         case 'music': {
@@ -714,7 +747,7 @@ export default function App() {
       currentScreen, push, playlists, albums, tracks, trackSource,
       loadPlaylists, loadAlbums, loadPlaylistTracks, loadAlbumTracks,
       loadRecentlyPlayed, playFromList, playContext, openLyrics, toggleShuffle,
-      cycleRepeat, toggleTheme, handleSearchKey,
+      cycleRepeat, toggleTheme, handleSearchKey, isDemoMode, accessToken,
     ]
   );
 
@@ -772,6 +805,7 @@ export default function App() {
       case 'mainMenu': return MAIN_MENU.length;
       case 'music': return MUSIC_MENU.length;
       case 'settings': return SETTINGS_MENU.length;
+      case 'sources': return PROVIDERS.length;
       case 'playlists': return playlists.length;
       case 'albums': return albums.length;
       case 'tracks':
@@ -821,6 +855,7 @@ export default function App() {
                   playerError={playerError}
                   searchQuery={searchQuery}
                   dataError={dataError}
+                  activeProviderId={activeProviderId}
                   trackSource={trackSource}
                   lyrics={lyrics}
                   lyricsLoading={lyricsLoading}
@@ -863,6 +898,7 @@ interface ScreenProps {
   playerError: string | null;
   searchQuery: string;
   dataError: string | null;
+  activeProviderId: ProviderId;
   trackSource: PlaySource | null;
   lyrics: TrackLyrics | null;
   lyricsLoading: boolean;
@@ -956,6 +992,15 @@ function ScreenContent(props: ScreenProps) {
           onItemClick={onItemClick}
         />
       );
+    case 'sources':
+      return (
+        <SourcesScreen
+          activeProviderId={props.activeProviderId}
+          selectedIndex={selectedIndex}
+          onItemClick={onItemClick}
+          note={props.dataError}
+        />
+      );
     case 'search':
       return (
         <SearchScreen
@@ -1029,6 +1074,62 @@ function LoginScreen({ selectedIndex, onItemClick }: { selectedIndex: number; on
       </ul>
     </div>
   );
+}
+
+// ── Sources screen ─────────────────────────────────────────
+
+function SourcesScreen({
+  activeProviderId,
+  selectedIndex,
+  onItemClick,
+  note,
+}: {
+  activeProviderId: ProviderId;
+  selectedIndex: number;
+  onItemClick: (i: number) => void;
+  note: string | null;
+}) {
+  const badge = (p: (typeof PROVIDERS)[number]) => {
+    if (p.id === activeProviderId) return 'Active';
+    if (p.status === 'planned') return 'Soon';
+    return 'Switch';
+  };
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <ul className="menu-list" style={{ flex: 1, overflowY: 'auto' }}>
+        {PROVIDERS.map((p, i) => (
+          <li
+            key={p.id}
+            className={`menu-item${i === selectedIndex ? ' selected' : ''}`}
+            onClick={() => onItemClick(i)}
+            style={{ cursor: 'pointer', opacity: p.status === 'planned' ? 0.55 : 1 }}
+          >
+            <span className="menu-item-text">{p.label}</span>
+            <span style={{ fontSize: '9px', opacity: 0.6, marginRight: '4px', flexShrink: 0 }}>
+              {badge(p)}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <div
+        style={{
+          padding: '4px 8px',
+          fontSize: '9px',
+          lineHeight: 1.3,
+          color: '#555',
+          borderTop: '1px solid rgba(0,0,0,0.08)',
+          minHeight: '28px',
+        }}
+      >
+        {note ?? PROVIDERS.find((p) => p.id === selectedIndexProvider(selectedIndex))?.blurb}
+      </div>
+    </div>
+  );
+}
+
+function selectedIndexProvider(idx: number): ProviderId | undefined {
+  return PROVIDERS[idx]?.id;
 }
 
 // ── Generic menu list ──────────────────────────────────────
