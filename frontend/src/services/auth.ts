@@ -150,3 +150,12 @@ export function getStoredToken(): string | null {
   if (!token || Date.now() > expires - 60_000) return null;
   return token;
 }
+
+/** Clear all stored Spotify tokens and the demo flag (full sign-out). */
+export function logout(): void {
+  localStorage.removeItem('spot_token');
+  localStorage.removeItem('spot_refresh');
+  localStorage.removeItem('spot_expires');
+  localStorage.removeItem('demo_mode');
+  sessionStorage.removeItem('pkce_verifier');
+}

@@ -9,25 +9,29 @@ import {
   createSpotifyService,
   describeDataError,
   formatTime,
+} from './services/spotify';
+import type {
   Album,
   Artist,
+  MusicPlayerController,
+  MusicProvider,
   Playlist,
   PlaySource,
+  ProviderId,
   RepeatMode,
-  SpotifyService,
   Track,
-} from './services/spotify';
+} from './services/providers/types';
 import {
   exchangeCodeForToken,
   getRedirectUriWarning,
   getSpotifyRedirectUri,
   getStoredToken,
+  logout,
   refreshAccessToken,
   redirectToSpotifyLogin,
 } from './services/auth';
 import { fetchLyrics, type TrackLyrics } from './services/lyrics';
 import { PROVIDERS } from './services/providers/registry';
-import type { ProviderId } from './services/providers/types';
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -56,9 +60,11 @@ interface NavEntry {
 const MAIN_MENU = ['Music', 'Search', 'Now Playing', 'Sources', 'Settings'];
 const MUSIC_MENU = ['Playlists', 'Albums', 'Artists', 'Recently Played'];
 const ARTIST_MENU = ['Top Tracks', 'Albums'];
-const SETTINGS_MENU = ['Shuffle', 'Repeat', 'Theme', 'About'];
+const SETTINGS_MENU = ['Shuffle', 'Repeat', 'Theme', 'About', 'Sign Out'];
 
 const REPEAT_ORDER: RepeatMode[] = ['off', 'context', 'track'];
+
+type ActiveMusicService = MusicProvider & MusicPlayerController;
 
 const SCREEN_TITLES: Record<Screen, string> = {
   login: 'OldPod.fm',
@@ -145,10 +151,10 @@ export default function App() {
   const [dataError, setDataError] = useState<string | null>(null);
 
   // Service
-  const [service, setService] = useState<SpotifyService | null>(null);
+  const [service, setService] = useState<ActiveMusicService | null>(null);
 
   // Which source is currently active (drives the Sources screen highlight).
-  const activeProviderId: ProviderId = isDemoMode ? 'demo' : 'spotify';
+  const activeProviderId: ProviderId = service?.meta.id ?? (isDemoMode ? 'demo' : 'spotify');
 
   // Data
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -400,7 +406,7 @@ export default function App() {
   );
 
   const loadArtists = useCallback(async () => {
-    if (!service) return;
+    if (!service?.getArtists) return;
     setIsLoading(true);
     setDataError(null);
     try {
@@ -417,7 +423,7 @@ export default function App() {
 
   const loadArtistAlbums = useCallback(
     async (artist: Artist) => {
-      if (!service) return;
+      if (!service?.getArtistAlbums) return;
       setIsLoading(true);
       setDataError(null);
       setAlbums([]);
@@ -436,7 +442,7 @@ export default function App() {
 
   const loadArtistTopTracks = useCallback(
     async (artist: Artist) => {
-      if (!service) return;
+      if (!service?.getArtistTopTracks) return;
       setIsLoading(true);
       setDataError(null);
       setTracks([]);
@@ -650,6 +656,24 @@ export default function App() {
     setTheme((t) => (t === 'black' ? 'light' : 'black'));
   }, []);
 
+  const signOut = useCallback(() => {
+    logout();
+    setAccessToken(null);
+    setIsDemoMode(false);
+    setService(null);
+    setPlaylists([]);
+    setAlbums([]);
+    setArtists([]);
+    setSelectedArtist(null);
+    setTracks([]);
+    setTrackSource(null);
+    setCurrentTrack(null);
+    setIsPlaying(false);
+    setPositionMs(0);
+    setDataError(null);
+    setNav([{ screen: 'login', index: 0 }]);
+  }, []);
+
   // ── Lyrics ────────────────────────────────────────────────
 
   useEffect(() => {
@@ -819,6 +843,7 @@ export default function App() {
           if (idx === 0) toggleShuffle();
           else if (idx === 1) cycleRepeat();
           else if (idx === 2) toggleTheme();
+          else if (idx === 4) signOut();
           break;
         }
         case 'search': {
@@ -835,7 +860,7 @@ export default function App() {
       loadPlaylists, loadAlbums, loadArtists, loadArtistAlbums, loadArtistTopTracks,
       loadPlaylistTracks, loadAlbumTracks,
       loadRecentlyPlayed, playFromList, playContext, openLyrics, toggleShuffle,
-      cycleRepeat, toggleTheme, handleSearchKey, isDemoMode, accessToken,
+      cycleRepeat, toggleTheme, signOut, handleSearchKey, isDemoMode, accessToken,
     ]
   );
 
@@ -1096,6 +1121,7 @@ function ScreenContent(props: ScreenProps) {
             { label: 'Repeat', detail: repeatLabel(props.repeat) },
             { label: 'Theme', detail: props.theme === 'black' ? 'Classic' : 'White' },
             { label: 'About', detail: 'v1.0' },
+            { label: 'Sign Out', detail: props.activeProviderId === 'demo' ? 'Exit demo' : 'Spotify' },
           ]}
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
