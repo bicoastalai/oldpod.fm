@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef } from 'react';
 
 /**
  * Ordered set of "keys" the click wheel scrolls through to compose a query.
@@ -22,15 +22,50 @@ interface Props {
   query: string;
   selectedIndex: number;
   onKeyClick: (index: number) => void;
+  onQueryChange: (value: string) => void;
+  onSubmit: (value: string) => void;
 }
 
-const SearchScreen: React.FC<Props> = ({ query, selectedIndex, onKeyClick }) => {
+const SearchScreen: React.FC<Props> = ({
+  query,
+  selectedIndex,
+  onKeyClick,
+  onQueryChange,
+  onSubmit,
+}) => {
+  const inputRef = useRef<HTMLInputElement>(null);
+
   return (
     <div className="search-screen">
-      <div className="search-query">
-        <span className="search-query-text">{query || 'Type a search…'}</span>
-        <span className="search-caret">|</span>
-      </div>
+      {/* Native text field — tap to use the phone keyboard */}
+      <form
+        className="search-input-row"
+        onSubmit={(e) => {
+          e.preventDefault();
+          // Read straight from the field to avoid a stale controlled-value race.
+          onSubmit(inputRef.current?.value ?? query);
+        }}
+      >
+        <span className="search-input-icon" aria-hidden>🔍</span>
+        <input
+          ref={inputRef}
+          className="search-input"
+          type="search"
+          value={query}
+          onChange={(e) => onQueryChange(e.target.value)}
+          placeholder="Search songs, artists…"
+          aria-label="Search Spotify"
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="none"
+          spellCheck={false}
+          enterKeyHint="search"
+        />
+      </form>
+
+      <div className="search-keys-hint">or spin the wheel</div>
+
+      {/* Click-wheel keypad (kept for the retro flow) */}
       <div className="search-keys">
         {SEARCH_KEYS.map((key, i) => (
           <button

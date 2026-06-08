@@ -298,11 +298,21 @@ export default function App() {
     async (playlist: Playlist) => {
       if (!service) return;
       setIsLoading(true);
+      setDataError(null);
+      setTracks([]);
       setTracksTitle(playlist.name);
+      // Always set the context so playback works even if we can't list songs.
+      setTrackSource({ contextUri: playlist.uri });
       try {
         const data = await service.getTracks(playlist.id);
         setTracks(data);
-        setTrackSource({ contextUri: `spotify:playlist:${playlist.id}` });
+        if (data.length === 0 && !playlist.owned) {
+          setDataError(
+            "Spotify no longer lets apps list songs for playlists you don't own. Press Play to start it."
+          );
+        }
+      } catch (e) {
+        setDataError(e instanceof Error ? e.message : 'Could not load songs');
       } finally {
         setIsLoading(false);
       }
@@ -314,11 +324,14 @@ export default function App() {
     async (album: Album) => {
       if (!service) return;
       setIsLoading(true);
+      setDataError(null);
+      setTracks([]);
       setTracksTitle(album.name);
+      setTrackSource({ contextUri: album.uri });
       try {
-        const data = await service.getAlbumTracks(album);
-        setTracks(data);
-        setTrackSource({ contextUri: album.uri });
+        setTracks(await service.getAlbumTracks(album));
+      } catch (e) {
+        setDataError(e instanceof Error ? e.message : 'Could not load album');
       } finally {
         setIsLoading(false);
       }
@@ -329,11 +342,15 @@ export default function App() {
   const loadRecentlyPlayed = useCallback(async () => {
     if (!service) return;
     setIsLoading(true);
+    setDataError(null);
+    setTracks([]);
     setTracksTitle('Recently Played');
     try {
       const data = await service.getRecentlyPlayed();
       setTracks(data);
       setTrackSource({ uris: data.map((t) => t.uri) });
+    } catch (e) {
+      setDataError(e instanceof Error ? e.message : 'Could not load recently played');
     } finally {
       setIsLoading(false);
     }
@@ -343,11 +360,16 @@ export default function App() {
     async (query: string) => {
       if (!service) return;
       setIsLoading(true);
+      setDataError(null);
+      setTracks([]);
       setTracksTitle('Results');
       try {
         const data = await service.search(query);
         setTracks(data);
         setTrackSource({ uris: data.map((t) => t.uri) });
+        if (data.length === 0) setDataError('No results');
+      } catch (e) {
+        setDataError(e instanceof Error ? e.message : 'Search failed');
       } finally {
         setIsLoading(false);
       }
@@ -373,6 +395,23 @@ export default function App() {
         } catch {
           setIsPlaying(false);
         }
+      }
+    },
+    [isDemoMode, service, activatePlayback, runWithDevice]
+  );
+
+  // Start a context (playlist/album) without a known track list — relies on the
+  // SDK to report the now-playing track. Used for playlists we can't enumerate.
+  const playContext = useCallback(
+    async (source: PlaySource) => {
+      if (isDemoMode || !service) return;
+      setPositionMs(0);
+      setIsPlaying(true);
+      try {
+        await activatePlayback();
+        await runWithDevice((id) => service.play(source, 0, id));
+      } catch {
+        setIsPlaying(false);
       }
     },
     [isDemoMode, service, activatePlayback, runWithDevice]
@@ -496,15 +535,26 @@ export default function App() {
 
   // ── Search key handling ──────────────────────────────────
 
+  const submitSearch = useCallback(
+    (value: string) => {
+      const q = value.trim();
+      if (!q) return;
+      setSearchQuery(value);
+      push('tracks');
+      void runSearch(value);
+    },
+    [runSearch, push]
+  );
+
   const handleSearchKey = useCallback(
     (idx: number) => {
       const key = SEARCH_KEYS[idx];
       if (key === 'SPACE') setSearchQuery((q) => q + ' ');
       else if (key === 'DEL') setSearchQuery((q) => q.slice(0, -1));
-      else if (key === 'GO') runSearch(searchQuery).then(() => push('tracks'));
+      else if (key === 'GO') submitSearch(searchQuery);
       else setSearchQuery((q) => q + key);
     },
-    [searchQuery, runSearch, push]
+    [submitSearch, searchQuery]
   );
 
   // ── Select action (takes explicit index to avoid stale closure) ──
@@ -533,23 +583,44 @@ export default function App() {
           break;
         }
         case 'music': {
-          if (idx === 0) loadPlaylists().then(() => push('playlists'));
-          else if (idx === 1) loadAlbums().then(() => push('albums'));
-          else if (idx === 2) loadRecentlyPlayed().then(() => push('tracks'));
+          if (idx === 0) {
+            push('playlists');
+            void loadPlaylists();
+          } else if (idx === 1) {
+            push('albums');
+            void loadAlbums();
+          } else if (idx === 2) {
+            push('tracks');
+            void loadRecentlyPlayed();
+          }
           break;
         }
         case 'playlists': {
           const pl = playlists[idx];
-          if (pl) loadPlaylistTracks(pl).then(() => push('tracks'));
+          if (pl) {
+            push('tracks');
+            void loadPlaylistTracks(pl);
+          }
           break;
         }
         case 'albums': {
           const al = albums[idx];
-          if (al) loadAlbumTracks(al).then(() => push('tracks'));
+          if (al) {
+            push('tracks');
+            void loadAlbumTracks(al);
+          }
           break;
         }
         case 'tracks': {
-          if (tracks[idx] && trackSource) playFromList(tracks, idx, trackSource).then(() => push('nowPlaying'));
+          // When songs couldn't be listed (e.g. a playlist you don't own) but we
+          // still have a context, the single "Play" row starts the whole thing.
+          if (tracks.length === 0 && trackSource && 'contextUri' in trackSource) {
+            push('nowPlaying');
+            void playContext(trackSource);
+          } else if (tracks[idx] && trackSource) {
+            push('nowPlaying');
+            void playFromList(tracks, idx, trackSource);
+          }
           break;
         }
         case 'settings': {
@@ -570,7 +641,7 @@ export default function App() {
     [
       currentScreen, push, playlists, albums, tracks, trackSource,
       loadPlaylists, loadAlbums, loadPlaylistTracks, loadAlbumTracks,
-      loadRecentlyPlayed, playFromList, openLyrics, toggleShuffle,
+      loadRecentlyPlayed, playFromList, playContext, openLyrics, toggleShuffle,
       cycleRepeat, toggleTheme, handleSearchKey,
     ]
   );
@@ -628,7 +699,10 @@ export default function App() {
       case 'settings': return SETTINGS_MENU.length;
       case 'playlists': return playlists.length;
       case 'albums': return albums.length;
-      case 'tracks': return tracks.length;
+      case 'tracks':
+        // Empty list + a context still offers one selectable "Play" row.
+        if (tracks.length === 0 && trackSource && 'contextUri' in trackSource) return 1;
+        return tracks.length;
       case 'search': return SEARCH_KEYS.length;
       case 'lyrics': return lyrics?.lines.length ?? 0;
       default: return 0;
@@ -671,10 +745,13 @@ export default function App() {
                   playerError={playerError}
                   searchQuery={searchQuery}
                   dataError={dataError}
+                  trackSource={trackSource}
                   lyrics={lyrics}
                   lyricsLoading={lyricsLoading}
                   lyricsUserScrolled={lyricsUserScrolled}
                   onItemClick={handleItemClick}
+                  onSearchChange={setSearchQuery}
+                  onSearchSubmit={submitSearch}
                 />
               )}
             </div>
@@ -709,10 +786,13 @@ interface ScreenProps {
   playerError: string | null;
   searchQuery: string;
   dataError: string | null;
+  trackSource: PlaySource | null;
   lyrics: TrackLyrics | null;
   lyricsLoading: boolean;
   lyricsUserScrolled: boolean;
   onItemClick: (index: number) => void;
+  onSearchChange: (value: string) => void;
+  onSearchSubmit: (value: string) => void;
 }
 
 function ScreenContent(props: ScreenProps) {
@@ -742,7 +822,7 @@ function ScreenContent(props: ScreenProps) {
         <MenuScreen
           items={props.playlists.map((p) => ({
             label: p.name,
-            detail: String(p.trackCount),
+            detail: p.trackCount > 0 ? String(p.trackCount) : undefined,
             arrow: true,
           }))}
           selectedIndex={selectedIndex}
@@ -763,7 +843,17 @@ function ScreenContent(props: ScreenProps) {
           emptyLabel={props.dataError ?? 'No albums'}
         />
       );
-    case 'tracks':
+    case 'tracks': {
+      const hasContext = !!props.trackSource && 'contextUri' in props.trackSource;
+      if (props.tracks.length === 0 && hasContext) {
+        return (
+          <PlayContextScreen
+            note={props.dataError}
+            selected={selectedIndex === 0}
+            onPlay={() => onItemClick(0)}
+          />
+        );
+      }
       return (
         <MenuScreen
           items={props.tracks.map((t) => ({
@@ -772,9 +862,10 @@ function ScreenContent(props: ScreenProps) {
           }))}
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
-          emptyLabel="No songs"
+          emptyLabel={props.dataError ?? 'No songs'}
         />
       );
+    }
     case 'settings':
       return (
         <MenuScreen
@@ -794,6 +885,8 @@ function ScreenContent(props: ScreenProps) {
           query={props.searchQuery}
           selectedIndex={selectedIndex}
           onKeyClick={onItemClick}
+          onQueryChange={props.onSearchChange}
+          onSubmit={props.onSearchSubmit}
         />
       );
     case 'nowPlaying':
@@ -918,6 +1011,30 @@ function MenuScreen({
         </li>
       ))}
     </ul>
+  );
+}
+
+// ── Play-context screen (playlists we can't enumerate) ─────
+
+function PlayContextScreen({
+  note,
+  selected,
+  onPlay,
+}: {
+  note: string | null;
+  selected: boolean;
+  onPlay: () => void;
+}) {
+  return (
+    <div className="play-context">
+      {note && <p className="play-context-note">{note}</p>}
+      <button
+        className={`play-context-btn${selected ? ' selected' : ''}`}
+        onClick={onPlay}
+      >
+        ▶ Play playlist
+      </button>
+    </div>
   );
 }
 

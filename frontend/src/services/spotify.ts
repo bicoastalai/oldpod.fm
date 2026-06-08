@@ -10,8 +10,12 @@ export interface Track {
 
 export interface Playlist {
   id: string;
+  uri: string;
   name: string;
+  /** 0 when Spotify does not expose a count (e.g. playlists you don't own). */
   trackCount: number;
+  /** True when the current user owns/collaborates — required to list songs (Feb 2026 API). */
+  owned: boolean;
 }
 
 export interface Album {
@@ -90,11 +94,11 @@ const MOCK_TRACKS: Record<string, Track[]> = {
 };
 
 const MOCK_PLAYLISTS: Playlist[] = [
-  { id: 'liked', name: 'Liked Songs', trackCount: MOCK_TRACKS.liked.length },
-  { id: 'chill', name: 'Chill Vibes', trackCount: MOCK_TRACKS.chill.length },
-  { id: 'road', name: 'Road Trip', trackCount: MOCK_TRACKS.road.length },
-  { id: 'workout', name: 'Workout Mix', trackCount: MOCK_TRACKS.workout.length },
-  { id: 'late', name: 'Late Night', trackCount: MOCK_TRACKS.late.length },
+  { id: 'liked', uri: 'mock:playlist:liked', name: 'Liked Songs', trackCount: MOCK_TRACKS.liked.length, owned: true },
+  { id: 'chill', uri: 'mock:playlist:chill', name: 'Chill Vibes', trackCount: MOCK_TRACKS.chill.length, owned: true },
+  { id: 'road', uri: 'mock:playlist:road', name: 'Road Trip', trackCount: MOCK_TRACKS.road.length, owned: true },
+  { id: 'workout', uri: 'mock:playlist:workout', name: 'Workout Mix', trackCount: MOCK_TRACKS.workout.length, owned: true },
+  { id: 'late', uri: 'mock:playlist:late', name: 'Late Night', trackCount: MOCK_TRACKS.late.length, owned: true },
 ];
 
 const MOCK_ALBUM_TRACKS: Record<string, Track[]> = {
@@ -188,10 +192,20 @@ export function createMockService(): SpotifyService {
 
 export type SpotifyTokenProvider = () => Promise<string | null>;
 
+/** Error carrying the HTTP status so callers can branch on 403/404 etc. */
+export class SpotifyApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'SpotifyApiError';
+    this.status = status;
+  }
+}
+
 export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifyService {
   const request = async (path: string, opts: RequestInit = {}) => {
     const token = await getToken();
-    if (!token) throw new Error('Not logged in to Spotify');
+    if (!token) throw new SpotifyApiError(401, 'Not logged in to Spotify');
     const res = await fetch(`https://api.spotify.com/v1${path}`, {
       ...opts,
       headers: {
@@ -203,20 +217,38 @@ export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifySer
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const msg = (data as { error?: { message?: string } })?.error?.message;
-      throw new Error(msg ?? `Spotify API error (${res.status})`);
+      throw new SpotifyApiError(res.status, msg ?? `Spotify API error (${res.status})`);
     }
     return data;
   };
 
+  // The current user's id is needed to know which playlists we can list
+  // (Feb 2026: /playlists/{id}/items only works for owned/collaborative ones).
+  let cachedUserId: string | null = null;
+  const getUserId = async (): Promise<string | null> => {
+    if (cachedUserId) return cachedUserId;
+    try {
+      const me = await request('/me');
+      cachedUserId = me?.id ?? null;
+    } catch {
+      cachedUserId = null;
+    }
+    return cachedUserId;
+  };
+
   return {
     async getPlaylists() {
-      const data = await request('/me/playlists?limit=50');
-      return (data.items ?? []).map((p: any) => ({
-        id: p.id,
-        name: p.name,
-        // Spotify now exposes count on `items`; `tracks` is deprecated.
-        trackCount: p.items?.total ?? p.tracks?.total ?? 0,
-      }));
+      const [meId, data] = await Promise.all([getUserId(), request('/me/playlists?limit=50')]);
+      return (data.items ?? [])
+        .filter((p: any) => p?.id)
+        .map((p: any) => ({
+          id: p.id,
+          uri: p.uri ?? `spotify:playlist:${p.id}`,
+          name: p.name,
+          // Feb 2026 renamed the playlist `tracks` field to `items`.
+          trackCount: p.items?.total ?? p.tracks?.total ?? 0,
+          owned: !!meId && p.owner?.id === meId,
+        }));
     },
 
     async getTracks(playlistId) {
@@ -225,12 +257,24 @@ export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifySer
       const limit = 50;
 
       while (true) {
-        const data = await request(
-          `/playlists/${playlistId}/items?limit=${limit}&offset=${offset}&additional_types=track`
-        );
+        let data: any;
+        try {
+          data = await request(
+            `/playlists/${playlistId}/items?limit=${limit}&offset=${offset}&additional_types=track`
+          );
+        } catch (e) {
+          // Feb 2026: listing items is only permitted for playlists the user
+          // owns or collaborates on; others return 403/404. Return what we have
+          // so the caller can still offer "Play playlist" via its context URI.
+          if (e instanceof SpotifyApiError && (e.status === 403 || e.status === 404)) {
+            return tracks;
+          }
+          throw e;
+        }
 
-        for (const row of data.items ?? []) {
-          const raw = row.track ?? row.item;
+        const rows = data.items ?? data.tracks?.items ?? [];
+        for (const row of rows) {
+          const raw = row.item ?? row.track;
           if (!raw?.id || raw.type === 'episode') continue;
           tracks.push({
             id: raw.id,
@@ -303,18 +347,32 @@ export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifySer
     },
 
     async search(query) {
-      const data = await request(`/search?type=track&limit=30&q=${encodeURIComponent(query)}`);
-      return (data.tracks?.items ?? [])
-        .filter((t: any) => t?.id)
-        .map((t: any) => ({
-          id: t.id,
-          uri: t.uri,
-          name: t.name,
-          artist: t.artists?.[0]?.name ?? 'Unknown',
-          album: t.album?.name ?? '',
-          albumArt: t.album?.images?.[0]?.url ?? null,
-          durationMs: t.duration_ms,
-        }));
+      const q = query.trim();
+      if (!q) return [];
+      // Feb 2026 capped the search `limit` at 10, so paginate a few pages.
+      const pageSize = 10;
+      const maxPages = 3;
+      const out: Track[] = [];
+      for (let page = 0; page < maxPages; page++) {
+        const data = await request(
+          `/search?type=track&limit=${pageSize}&offset=${page * pageSize}&q=${encodeURIComponent(q)}`
+        );
+        const items = data.tracks?.items ?? [];
+        for (const t of items) {
+          if (!t?.id) continue;
+          out.push({
+            id: t.id,
+            uri: t.uri,
+            name: t.name,
+            artist: t.artists?.[0]?.name ?? 'Unknown',
+            album: t.album?.name ?? '',
+            albumArt: t.album?.images?.[0]?.url ?? null,
+            durationMs: t.duration_ms,
+          });
+        }
+        if (items.length < pageSize) break;
+      }
+      return out;
     },
 
     async play(source, trackIndex, deviceId) {
