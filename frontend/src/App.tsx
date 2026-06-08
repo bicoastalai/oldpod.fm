@@ -191,6 +191,8 @@ export default function App() {
     activatePlayback,
     runWithDevice,
     setPlayerVolume,
+    getDeviceVolume,
+    volumeControllable,
   } = useSpotifyPlayer(accessToken);
 
   const resolveSpotifyToken = useCallback(async (): Promise<string | null> => {
@@ -202,6 +204,24 @@ export default function App() {
     }
     return null;
   }, []);
+
+  // Mirror the device's real (SDK) volume into the bar while Now Playing is
+  // visible. iOS is hardware-locked (volumeControllable = false), so we leave
+  // the bar alone there and show a device-controlled hint instead.
+  useEffect(() => {
+    if (isDemoMode || !volumeControllable || currentScreen !== 'nowPlaying') return;
+    let active = true;
+    const sync = async () => {
+      const v = await getDeviceVolume();
+      if (active && v !== null) setVolume(v);
+    };
+    void sync();
+    const id = window.setInterval(() => void sync(), 1000);
+    return () => {
+      active = false;
+      window.clearInterval(id);
+    };
+  }, [isDemoMode, volumeControllable, currentScreen, getDeviceVolume]);
 
   // ── Init service + session bootstrap ─────────────────────
 
@@ -792,6 +812,7 @@ export default function App() {
                   isPlaying={isPlaying}
                   positionMs={positionMs}
                   volume={volume}
+                  volumeControllable={volumeControllable}
                   shuffle={shuffle}
                   repeat={repeat}
                   theme={theme}
@@ -833,6 +854,7 @@ interface ScreenProps {
   isPlaying: boolean;
   positionMs: number;
   volume: number;
+  volumeControllable: boolean;
   shuffle: boolean;
   repeat: RepeatMode;
   theme: Theme;
@@ -950,6 +972,7 @@ function ScreenContent(props: ScreenProps) {
           isPlaying={props.isPlaying}
           positionMs={props.positionMs}
           volume={props.volume}
+          volumeControllable={props.volumeControllable}
           shuffle={props.shuffle}
           repeat={props.repeat}
           isPlayerReady={props.isPlayerReady}
@@ -1099,6 +1122,7 @@ function NowPlayingScreen({
   isPlaying,
   positionMs,
   volume,
+  volumeControllable,
   shuffle,
   repeat,
   isPlayerReady,
@@ -1108,6 +1132,7 @@ function NowPlayingScreen({
   isPlaying: boolean;
   positionMs: number;
   volume: number;
+  volumeControllable: boolean;
   shuffle: boolean;
   repeat: RepeatMode;
   isPlayerReady: boolean;
@@ -1179,14 +1204,18 @@ function NowPlayingScreen({
         <span>-{formatTime(Math.max(0, track.durationMs - positionMs))}</span>
       </div>
 
-      {/* Volume */}
-      <div className="volume-row">
-        <span className="volume-label">🔈</span>
-        <div className="volume-bar">
-          <div className="volume-fill" style={{ width: `${volume}%` }} />
+      {/* Volume — on iOS/touch the system locks audio to the hardware buttons
+          and the SDK can't read or set it, so we omit the row entirely there
+          and reclaim the space. On desktop it mirrors the real SDK volume. */}
+      {volumeControllable && (
+        <div className="volume-row">
+          <span className="volume-label">🔈</span>
+          <div className="volume-bar">
+            <div className="volume-fill" style={{ width: `${volume}%` }} />
+          </div>
+          <span className="volume-label" style={{ textAlign: 'right' }}>🔊</span>
         </div>
-        <span className="volume-label" style={{ textAlign: 'right' }}>🔊</span>
-      </div>
+      )}
 
       {playerError ? (
         <div className="np-hint np-hint--error">{playerError}</div>

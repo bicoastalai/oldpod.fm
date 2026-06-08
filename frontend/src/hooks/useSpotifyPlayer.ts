@@ -14,6 +14,16 @@ type PlayJob = (deviceId: string) => Promise<void>;
 let singletonPlayer: any = null;
 let connectPromise: Promise<string | null> | null = null;
 
+/**
+ * iOS/iPadOS lock media volume to the hardware buttons — the Web Playback SDK's
+ * setVolume/getVolume are no-ops there (getVolume always returns 1). Everywhere
+ * else the SDK exposes a real, readable software volume we can mirror.
+ */
+const isVolumeHardwareLocked =
+  typeof navigator !== 'undefined' &&
+  (/iP(hone|ad|od)/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+
 function destroyPlayer() {
   connectPromise = null;
   if (singletonPlayer) {
@@ -254,6 +264,18 @@ export function useSpotifyPlayer(accessToken: string | null) {
     }
   }, []);
 
+  /** Reads the SDK's actual software volume (0–100), or null if unavailable. */
+  const getDeviceVolume = useCallback(async (): Promise<number | null> => {
+    const player = playerRef.current ?? singletonPlayer;
+    if (!player?.getVolume) return null;
+    try {
+      const v = await player.getVolume();
+      return typeof v === 'number' ? Math.round(v * 100) : null;
+    } catch {
+      return null;
+    }
+  }, []);
+
   // Connect the player as soon as we have a token so the device is registered
   // and `activateElement()` can run within the first play gesture (see above).
   useEffect(() => {
@@ -282,5 +304,7 @@ export function useSpotifyPlayer(accessToken: string | null) {
     runWithDevice,
     ensurePlayer,
     setPlayerVolume,
+    getDeviceVolume,
+    volumeControllable: !isVolumeHardwareLocked,
   };
 }
