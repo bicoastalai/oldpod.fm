@@ -1,11 +1,26 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const SPOTIFY_CLIENT_ID = (import.meta as any).env.VITE_SPOTIFY_CLIENT_ID as string;
 
+function normalizeUri(uri: string): string {
+  return uri.trim().replace(/\/$/, '');
+}
+
+function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === 'localhost';
+}
+
 /** Redirect URI sent to Spotify — must match the dashboard entry character-for-character. */
 export function getSpotifyRedirectUri(): string {
+  const origin = normalizeUri(window.location.origin);
   const fromEnv = (import.meta as any).env.VITE_SPOTIFY_REDIRECT_URI as string | undefined;
-  const raw = fromEnv?.trim() || window.location.origin;
-  return raw.replace(/\/$/, '');
+  if (!fromEnv?.trim()) return origin;
+
+  const envUri = normalizeUri(fromEnv);
+  // VITE_* is baked in at build time — don't send loopback URIs from a live deployment.
+  if (isLoopbackHost(new URL(envUri).hostname) && !isLoopbackHost(window.location.hostname)) {
+    return origin;
+  }
+  return envUri;
 }
 
 /** Shown on login when the user opened the app on a host Spotify will reject. */
@@ -13,6 +28,17 @@ export function getRedirectUriWarning(): string | null {
   const host = window.location.hostname;
   if (host === 'localhost') {
     return 'Use http://127.0.0.1:5173 — Spotify does not allow http://localhost redirect URIs.';
+  }
+  const fromEnv = (import.meta as any).env.VITE_SPOTIFY_REDIRECT_URI as string | undefined;
+  if (fromEnv?.trim()) {
+    try {
+      const envHost = new URL(normalizeUri(fromEnv)).hostname;
+      if (isLoopbackHost(envHost) && !isLoopbackHost(host)) {
+        return 'Production is using this site’s URL for Spotify login (not 127.0.0.1). Add it in the Spotify dashboard.';
+      }
+    } catch {
+      /* ignore malformed env */
+    }
   }
   return null;
 }
