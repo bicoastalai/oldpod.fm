@@ -1,68 +1,18 @@
-export interface Track {
-  id: string;
-  uri: string;
-  name: string;
-  artist: string;
-  album: string;
-  albumArt: string | null;
-  durationMs: number;
-}
+import { getProviderMeta } from './providers/registry';
+import type {
+  Album,
+  Artist,
+  MusicPlayerController,
+  MusicProvider,
+  Playlist,
+  PlaySource,
+  RepeatMode,
+  Track,
+} from './providers/types';
 
-export interface Playlist {
-  id: string;
-  uri: string;
-  name: string;
-  /** 0 when Spotify does not expose a count (e.g. playlists you don't own). */
-  trackCount: number;
-  /** True when the current user owns/collaborates — required to list songs (Feb 2026 API). */
-  owned: boolean;
-}
+export type { Album, Artist, Playlist, PlaySource, RepeatMode, Track } from './providers/types';
 
-export interface Album {
-  id: string;
-  uri: string;
-  name: string;
-  artist: string;
-  albumArt: string | null;
-  trackCount: number;
-}
-
-export interface Artist {
-  id: string;
-  uri: string;
-  name: string;
-  image: string | null;
-}
-
-export type RepeatMode = 'off' | 'context' | 'track';
-
-/**
- * Describes where playback should start. Playlists and albums play through a
- * Spotify "context" (so the queue extends beyond the loaded page), while ad-hoc
- * lists (search results, recently played) play from an explicit set of URIs.
- */
-export type PlaySource = { contextUri: string } | { uris: string[] };
-
-export interface SpotifyService {
-  getPlaylists(): Promise<Playlist[]>;
-  getTracks(playlistId: string): Promise<Track[]>;
-  getAlbums(): Promise<Album[]>;
-  getAlbumTracks(album: Album): Promise<Track[]>;
-  getArtists(): Promise<Artist[]>;
-  getArtistAlbums(artist: Artist): Promise<Album[]>;
-  getArtistTopTracks(artist: Artist): Promise<Track[]>;
-  getRecentlyPlayed(): Promise<Track[]>;
-  search(query: string): Promise<Track[]>;
-  play(source: PlaySource, trackIndex: number, deviceId: string): Promise<void>;
-  pause(deviceId: string): Promise<void>;
-  resume(deviceId: string): Promise<void>;
-  next(deviceId: string): Promise<void>;
-  previous(deviceId: string): Promise<void>;
-  seek(positionMs: number, deviceId: string): Promise<void>;
-  setVolume(volumePct: number, deviceId: string): Promise<void>;
-  setShuffle(state: boolean, deviceId: string): Promise<void>;
-  setRepeat(mode: RepeatMode, deviceId: string): Promise<void>;
-}
+export type SpotifyService = MusicProvider & MusicPlayerController;
 
 // ── Mock data ──────────────────────────────────────────────
 
@@ -163,6 +113,7 @@ function sleep(ms: number) {
 
 export function createMockService(): SpotifyService {
   return {
+    meta: getProviderMeta('demo')!,
     async getPlaylists() {
       await sleep(250);
       return MOCK_PLAYLISTS;
@@ -283,6 +234,7 @@ export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifySer
   };
 
   return {
+    meta: getProviderMeta('spotify')!,
     async getPlaylists() {
       const [meId, data] = await Promise.all([getUserId(), request('/me/playlists?limit=50')]);
       return (data.items ?? [])

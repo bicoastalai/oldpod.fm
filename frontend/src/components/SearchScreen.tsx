@@ -54,7 +54,7 @@ const SearchScreen: React.FC<Props> = ({
           value={query}
           onChange={(e) => onQueryChange(e.target.value)}
           placeholder="Search songs, artists…"
-          aria-label="Search Spotify"
+          aria-label="Search music"
           autoComplete="off"
           autoCorrect="off"
           autoCapitalize="none"

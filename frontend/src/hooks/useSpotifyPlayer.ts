@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getStoredToken, refreshAccessToken } from '../services/auth';
-import type { Track } from '../services/spotify';
+import type { Track } from '../services/providers/types';
 
 export interface SDKPlayerState {
   isPlaying: boolean;

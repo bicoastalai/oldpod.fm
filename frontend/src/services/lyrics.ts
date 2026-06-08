@@ -1,4 +1,4 @@
-import type { Track } from './spotify';
+import type { Track } from './providers/types';
 
 const LRCLIB = 'https://lrclib.net/api';
 const USER_AGENT = 'OldPod.fm/1.0 (https://github.com/bicoastalai/oldpod.fm)';

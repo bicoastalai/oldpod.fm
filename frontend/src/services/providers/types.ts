@@ -7,12 +7,52 @@
  * in-app playback, a `MusicPlayerController`. New sources slot in by adding a
  * registry entry plus an implementation — no UI changes required.
  *
- * Media types live in `../spotify` for now and are re-exported here so callers
- * can import them from a source-neutral path.
  */
-export type { Track, Playlist, Album, Artist, PlaySource, RepeatMode } from '../spotify';
-
 export type ProviderId = 'demo' | 'spotify' | 'audius' | 'youtube' | 'radio';
+
+export interface Track {
+  id: string;
+  uri: string;
+  name: string;
+  artist: string;
+  album: string;
+  albumArt: string | null;
+  durationMs: number;
+}
+
+export interface Playlist {
+  id: string;
+  uri: string;
+  name: string;
+  /** 0 when a provider does not expose a count. */
+  trackCount: number;
+  /** True when the current user can enumerate the playlist tracks. */
+  owned: boolean;
+}
+
+export interface Album {
+  id: string;
+  uri: string;
+  name: string;
+  artist: string;
+  albumArt: string | null;
+  trackCount: number;
+}
+
+export interface Artist {
+  id: string;
+  uri: string;
+  name: string;
+  image: string | null;
+}
+
+export type RepeatMode = 'off' | 'context' | 'track';
+
+/**
+ * Describes where playback should start. Context-capable providers can play a
+ * provider-native collection; ad-hoc lists play from explicit track URIs.
+ */
+export type PlaySource = { contextUri: string } | { uris: string[] };
 
 export interface ProviderCapabilities {
   /** Requires the user to authenticate before browsing/playing. */
@@ -40,19 +80,35 @@ export interface ProviderMeta {
 }
 
 /**
- * Browse/search side of a music source. Mirrors the existing `SpotifyService`
- * data methods so the current Spotify implementation already conforms.
+ * Browse/search side of a music source. Current Spotify and demo services
+ * implement this, and future sources add their own implementations.
  */
 export interface MusicProvider {
   meta: ProviderMeta;
-  getPlaylists(): Promise<import('../spotify').Playlist[]>;
-  getTracks(playlistId: string): Promise<import('../spotify').Track[]>;
-  getAlbums(): Promise<import('../spotify').Album[]>;
-  getAlbumTracks(album: import('../spotify').Album): Promise<import('../spotify').Track[]>;
-  getRecentlyPlayed(): Promise<import('../spotify').Track[]>;
-  search(query: string): Promise<import('../spotify').Track[]>;
+  getPlaylists(): Promise<Playlist[]>;
+  getTracks(playlistId: string): Promise<Track[]>;
+  getAlbums(): Promise<Album[]>;
+  getAlbumTracks(album: Album): Promise<Track[]>;
+  getRecentlyPlayed(): Promise<Track[]>;
+  search(query: string): Promise<Track[]>;
   // Optional artist browsing — present only when capabilities.hasArtists.
-  getArtists?(): Promise<import('../spotify').Artist[]>;
-  getArtistAlbums?(artist: import('../spotify').Artist): Promise<import('../spotify').Album[]>;
-  getArtistTopTracks?(artist: import('../spotify').Artist): Promise<import('../spotify').Track[]>;
+  getArtists?(): Promise<Artist[]>;
+  getArtistAlbums?(artist: Artist): Promise<Album[]>;
+  getArtistTopTracks?(artist: Artist): Promise<Track[]>;
+}
+
+/**
+ * Playback/control side of a music source. Spotify implements this through the
+ * Web Playback SDK today; later sources can back it with <audio> or an iframe.
+ */
+export interface MusicPlayerController {
+  play(source: PlaySource, trackIndex: number, deviceId: string): Promise<void>;
+  pause(deviceId: string): Promise<void>;
+  resume(deviceId: string): Promise<void>;
+  next(deviceId: string): Promise<void>;
+  previous(deviceId: string): Promise<void>;
+  seek(positionMs: number, deviceId: string): Promise<void>;
+  setVolume(volumePct: number, deviceId: string): Promise<void>;
+  setShuffle(state: boolean, deviceId: string): Promise<void>;
+  setRepeat(mode: RepeatMode, deviceId: string): Promise<void>;
 }
