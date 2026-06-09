@@ -70,6 +70,7 @@ interface YtVideoItem {
   id?: string;
   snippet?: YtSnippet;
   contentDetails?: { duration?: string };
+  status?: { embeddable?: boolean };
 }
 
 // ── Helpers ────────────────────────────────────────────────
@@ -78,6 +79,21 @@ function requireKey(): string {
   const key = import.meta.env.VITE_YOUTUBE_API_KEY;
   if (typeof key !== 'string' || key.length === 0) throw new Error(YOUTUBE_NO_KEY_MESSAGE);
   return key;
+}
+
+/** Decode HTML entities YouTube returns in titles (e.g. "Doesn&#39;t", "Rock &amp; Roll"). */
+function decodeEntities(s: string): string {
+  return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (match, code: string) => {
+    if (code[0] === '#') {
+      const isHex = code[1] === 'x' || code[1] === 'X';
+      const num = isHex ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+      return Number.isFinite(num) ? String.fromCodePoint(num) : match;
+    }
+    const named: Record<string, string> = {
+      amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+    };
+    return named[code] ?? match;
+  });
 }
 
 /** Parse an ISO-8601 duration (e.g. "PT3M14S") into milliseconds. */
@@ -109,8 +125,8 @@ function mapTrack(id: string, snippet: YtSnippet | undefined, durationMs: number
   return {
     id,
     uri: `youtube:video:${id}`,
-    name: snippet?.title?.trim() || 'Untitled',
-    artist: snippet?.channelTitle?.trim() || 'Unknown',
+    name: decodeEntities(snippet?.title?.trim() || '') || 'Untitled',
+    artist: decodeEntities(snippet?.channelTitle?.trim() || '') || 'Unknown',
     // YouTube has no album concept for videos.
     album: '',
     albumArt: bestThumbnail(snippet?.thumbnails),
@@ -188,14 +204,16 @@ export function createYouTubeService(): YouTubeService {
 
     async getTrending(): Promise<Track[]> {
       const key = requireKey();
+      // `status` lets us drop non-embeddable videos (the chart can't pre-filter).
       const url =
-        `${BASE}/videos?part=snippet,contentDetails&chart=mostPopular` +
+        `${BASE}/videos?part=snippet,contentDetails,status&chart=mostPopular` +
         `&videoCategoryId=${MUSIC_CATEGORY_ID}&maxResults=${MAX_RESULTS}&regionCode=US&key=${key}`;
       const json = await ytFetch(url);
       const items = Array.isArray(json.items) ? (json.items as YtVideoItem[]) : [];
       const out: Track[] = [];
       for (const it of items) {
         if (typeof it.id !== 'string') continue;
+        if (it.status?.embeddable === false) continue;
         out.push(mapTrack(it.id, it.snippet, parseIsoDuration(it.contentDetails?.duration)));
       }
       return out;
@@ -205,8 +223,11 @@ export function createYouTubeService(): YouTubeService {
       const q = query.trim();
       if (!q) return [];
       const key = requireKey();
+      // videoEmbeddable/videoSyndicated keep out videos that can't play in the
+      // IFrame player (e.g. many official VEVO uploads disable embedding).
       const searchUrl =
         `${BASE}/search?part=snippet&type=video&videoCategoryId=${MUSIC_CATEGORY_ID}` +
+        `&videoEmbeddable=true&videoSyndicated=true` +
         `&maxResults=${MAX_RESULTS}&q=${encodeURIComponent(q)}&key=${key}`;
       const json = await ytFetch(searchUrl);
       const items = Array.isArray(json.items) ? (json.items as YtSearchItem[]) : [];

@@ -90,7 +90,16 @@ export function useYouTubePlayer(onEnded?: () => void) {
       playerRef.current = new window.YT.Player(hostRef.current, {
         width: '100%',
         height: '100%',
-        playerVars: { playsinline: 1, rel: 0, modestbranding: 1, controls: 0, fs: 0 },
+        // `origin` is required for reliable embedded playback; without it YouTube
+        // can refuse to play otherwise-embeddable videos ("Video unavailable").
+        playerVars: {
+          playsinline: 1,
+          rel: 0,
+          modestbranding: 1,
+          controls: 0,
+          fs: 0,
+          origin: typeof window !== 'undefined' ? window.location.origin : undefined,
+        },
         events: {
           onReady: () => {
             readyRef.current = true;
