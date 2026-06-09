@@ -56,8 +56,8 @@ export const PROVIDERS: ProviderMeta[] = [
   {
     id: 'youtube',
     label: 'YouTube',
-    blurb: 'Big catalog (coming soon)',
-    status: 'planned',
+    blurb: 'Huge catalog, real video',
+    status: 'ready',
     capabilities: {
       needsLogin: false,
       needsPremiumForPlayback: false,
