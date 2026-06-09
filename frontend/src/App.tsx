@@ -4,6 +4,7 @@ import LyricsScreen from './components/LyricsScreen';
 import SearchScreen, { SEARCH_KEYS } from './components/SearchScreen';
 import { useSpotifyPlayer } from './hooks/useSpotifyPlayer';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
+import { useYouTubePlayer } from './hooks/useYouTubePlayer';
 import {
   albumArtPlaceholder,
   createMockService,
@@ -12,6 +13,7 @@ import {
   formatTime,
 } from './services/spotify';
 import { createAudiusService } from './services/audius';
+import { createYouTubeService } from './services/youtube';
 import type {
   Album,
   Artist,
@@ -212,6 +214,11 @@ export default function App() {
     if (getStoredToken() || localStorage.getItem('spot_refresh')) return false;
     return localStorage.getItem('source') === 'audius';
   });
+  // YouTube is another login-less source, remembered the same way.
+  const [isYouTubeMode, setIsYouTubeMode] = useState(() => {
+    if (getStoredToken() || localStorage.getItem('spot_refresh')) return false;
+    return localStorage.getItem('source') === 'youtube';
+  });
   const [dataError, setDataError] = useState<string | null>(null);
 
   // Service
@@ -219,8 +226,10 @@ export default function App() {
 
   // Which source is currently active (drives the Sources screen highlight).
   const activeProviderId: ProviderId =
-    service?.meta.id ?? (isDemoMode ? 'demo' : isAudiusMode ? 'audius' : 'spotify');
+    service?.meta.id ??
+    (isDemoMode ? 'demo' : isAudiusMode ? 'audius' : isYouTubeMode ? 'youtube' : 'spotify');
   const isAudius = activeProviderId === 'audius';
+  const isYouTube = activeProviderId === 'youtube';
   const isSpotify = activeProviderId === 'spotify';
 
   // Data
@@ -290,6 +299,12 @@ export default function App() {
   const audiusEndedRef = useRef<() => void>(() => {});
   const audio = useAudioPlayer(useCallback(() => audiusEndedRef.current(), []));
 
+  // YouTube IFrame player (routed by provider id, same pattern as Audius). The
+  // end-of-track handler advances the queue via a ref so the hook keeps a stable
+  // callback while still seeing fresh shuffle/repeat/index state.
+  const youtubeEndedRef = useRef<() => void>(() => {});
+  const youtube = useYouTubePlayer(useCallback(() => youtubeEndedRef.current(), []));
+
   const resolveSpotifyToken = useCallback(async (): Promise<string | null> => {
     let token = getStoredToken();
     if (!token) token = await refreshAccessToken();
@@ -323,6 +338,11 @@ export default function App() {
     if (isAudius) audio.setVolume(volume);
   }, [isAudius, volume, audio]);
 
+  // Keep the YouTube IFrame player's volume in sync with the volume bar.
+  useEffect(() => {
+    if (isYouTube) youtube.setVolume(volume);
+  }, [isYouTube, volume, youtube]);
+
   // ── Init service + session bootstrap ─────────────────────
 
   useEffect(() => {
@@ -334,11 +354,15 @@ export default function App() {
       setService(createAudiusService());
       return;
     }
+    if (isYouTubeMode) {
+      setService(createYouTubeService());
+      return;
+    }
     setService(createSpotifyService(resolveSpotifyToken));
-  }, [isDemoMode, isAudiusMode, resolveSpotifyToken]);
+  }, [isDemoMode, isAudiusMode, isYouTubeMode, resolveSpotifyToken]);
 
   useEffect(() => {
-    if (isDemoMode || isAudiusMode) {
+    if (isDemoMode || isAudiusMode || isYouTubeMode) {
       if (nav[0]?.screen === 'login') setNav([{ screen: 'mainMenu', index: 0 }]);
       return;
     }
@@ -347,7 +371,7 @@ export default function App() {
         setNav([{ screen: 'mainMenu', index: 0 }]);
       }
     });
-  }, [isDemoMode, isAudiusMode, resolveSpotifyToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isDemoMode, isAudiusMode, isYouTubeMode, resolveSpotifyToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Handle PKCE callback (?code=...) ────────────────────
 
@@ -388,6 +412,14 @@ export default function App() {
     setIsPlaying(audio.audioState.isPlaying);
     if (Date.now() >= scrubbingUntilRef.current) setPositionMs(audio.audioState.positionMs);
   }, [isAudius, audio.audioState]);
+
+  // ── YouTube (IFrame) state sync ──────────────────────────
+
+  useEffect(() => {
+    if (!isYouTube) return;
+    setIsPlaying(youtube.playerState.isPlaying);
+    if (Date.now() >= scrubbingUntilRef.current) setPositionMs(youtube.playerState.positionMs);
+  }, [isYouTube, youtube.playerState]);
 
   // ── Demo mode position timer ─────────────────────────────
 
@@ -618,6 +650,14 @@ export default function App() {
     [audio]
   );
 
+  // YouTube plays the videoId (Track.id) through the IFrame player.
+  const playYouTubeTrack = useCallback(
+    async (track: Track) => {
+      await youtube.loadAndPlay(track.id);
+    },
+    [youtube]
+  );
+
   const playFromList = useCallback(
     async (trackList: Track[], idx: number, source: PlaySource) => {
       const track = trackList[idx];
@@ -631,6 +671,10 @@ export default function App() {
         await playAudiusTrack(track);
         return;
       }
+      if (isYouTube) {
+        await playYouTubeTrack(track);
+        return;
+      }
       // Demo mode is driven by the simulated position timer; Spotify by the SDK.
       if (!isDemoMode && service) {
         try {
@@ -641,7 +685,7 @@ export default function App() {
         }
       }
     },
-    [isAudius, playAudiusTrack, isDemoMode, service, activatePlayback, runWithDevice]
+    [isAudius, playAudiusTrack, isYouTube, playYouTubeTrack, isDemoMode, service, activatePlayback, runWithDevice]
   );
 
   // Start a context (playlist/album) without a known track list — relies on the
@@ -669,6 +713,11 @@ export default function App() {
       else audio.pause();
       return;
     }
+    if (isYouTube) {
+      if (next) youtube.resume();
+      else youtube.pause();
+      return;
+    }
     if (!isDemoMode && service) {
       try {
         await activatePlayback();
@@ -677,7 +726,7 @@ export default function App() {
         setIsPlaying(!next);
       }
     }
-  }, [isPlaying, isAudius, audio, isDemoMode, service, activatePlayback, runWithDevice]);
+  }, [isPlaying, isAudius, audio, isYouTube, youtube, isDemoMode, service, activatePlayback, runWithDevice]);
 
   const skipNext = useCallback(async () => {
     const list = playingTracksRef.current;
@@ -692,6 +741,10 @@ export default function App() {
       if (nextTrack) await playAudiusTrack(nextTrack);
       return;
     }
+    if (isYouTube) {
+      if (nextTrack) await playYouTubeTrack(nextTrack);
+      return;
+    }
     if (!isDemoMode && service) {
       try {
         await activatePlayback();
@@ -700,7 +753,7 @@ export default function App() {
         /* keep UI state */
       }
     }
-  }, [currentTrackIndex, shuffle, isAudius, playAudiusTrack, isDemoMode, service, activatePlayback, runWithDevice]);
+  }, [currentTrackIndex, shuffle, isAudius, playAudiusTrack, isYouTube, playYouTubeTrack, isDemoMode, service, activatePlayback, runWithDevice]);
 
   const skipPrev = useCallback(async () => {
     const list = playingTracksRef.current;
@@ -708,6 +761,10 @@ export default function App() {
       setPositionMs(0);
       if (isAudius) {
         audio.seek(0);
+        return;
+      }
+      if (isYouTube) {
+        youtube.seek(0);
         return;
       }
       if (!isDemoMode && service) {
@@ -728,6 +785,10 @@ export default function App() {
         if (prevTrack) await playAudiusTrack(prevTrack);
         return;
       }
+      if (isYouTube) {
+        if (prevTrack) await playYouTubeTrack(prevTrack);
+        return;
+      }
       if (!isDemoMode && service) {
         try {
           await activatePlayback();
@@ -737,7 +798,7 @@ export default function App() {
         }
       }
     }
-  }, [currentTrackIndex, positionMs, isAudius, audio, playAudiusTrack, isDemoMode, service, activatePlayback, runWithDevice]);
+  }, [currentTrackIndex, positionMs, isAudius, audio, playAudiusTrack, isYouTube, youtube, playYouTubeTrack, isDemoMode, service, activatePlayback, runWithDevice]);
 
   // When an Audius track ends, advance the queue using the same repeat/shuffle
   // rules as demo mode. Kept in a ref so the audio hook's `ended` listener
@@ -771,6 +832,37 @@ export default function App() {
     };
   }, [repeat, shuffle, currentTrackIndex, currentTrack, playAudiusTrack]);
 
+  // When a YouTube video ends, advance the queue with the same repeat/shuffle
+  // rules. Kept in a ref so the IFrame hook's listener always runs latest logic.
+  useEffect(() => {
+    youtubeEndedRef.current = () => {
+      const list = playingTracksRef.current;
+      if (repeat === 'track') {
+        const t = list[currentTrackIndex] ?? currentTrack;
+        if (t) void playYouTubeTrack(t);
+        return;
+      }
+      const nextIdx = pickNextIndex(currentTrackIndex, list.length, shuffle);
+      if (nextIdx < list.length) {
+        const next = list[nextIdx];
+        setCurrentTrack(next);
+        setCurrentTrackIndex(nextIdx);
+        setPositionMs(0);
+        void playYouTubeTrack(next);
+        return;
+      }
+      if (repeat === 'context' && list.length > 0) {
+        const first = list[0];
+        setCurrentTrack(first);
+        setCurrentTrackIndex(0);
+        setPositionMs(0);
+        void playYouTubeTrack(first);
+        return;
+      }
+      setIsPlaying(false);
+    };
+  }, [repeat, shuffle, currentTrackIndex, currentTrack, playYouTubeTrack]);
+
   const adjustVolume = useCallback(
     (delta: number) => {
       const newVol = Math.max(0, Math.min(100, volume + delta));
@@ -779,12 +871,16 @@ export default function App() {
         audio.setVolume(newVol);
         return;
       }
+      if (isYouTube) {
+        youtube.setVolume(newVol);
+        return;
+      }
       if (!isDemoMode && service && deviceId) {
         void service.setVolume(newVol, deviceId);
         setPlayerVolume(newVol);
       }
     },
-    [volume, isAudius, audio, isDemoMode, service, deviceId, setPlayerVolume]
+    [volume, isAudius, audio, isYouTube, youtube, isDemoMode, service, deviceId, setPlayerVolume]
   );
 
   // Scrub the current track. Each wheel tick nudges the position; the real
@@ -802,6 +898,10 @@ export default function App() {
         audio.seek(target);
         return;
       }
+      if (isYouTube) {
+        youtube.seek(target);
+        return;
+      }
       if (isDemoMode || !service) return;
       if (seekTimerRef.current) window.clearTimeout(seekTimerRef.current);
       seekTimerRef.current = window.setTimeout(() => {
@@ -815,7 +915,7 @@ export default function App() {
         })();
       }, 250);
     },
-    [currentTrack, isAudius, audio, isDemoMode, service, activatePlayback, runWithDevice]
+    [currentTrack, isAudius, audio, isYouTube, youtube, isDemoMode, service, activatePlayback, runWithDevice]
   );
 
   // ── Settings toggles ─────────────────────────────────────
@@ -841,9 +941,11 @@ export default function App() {
     localStorage.removeItem('demo_mode');
     localStorage.removeItem('source');
     audio.stop();
+    youtube.stop();
     setAccessToken(null);
     setIsDemoMode(false);
     setIsAudiusMode(false);
+    setIsYouTubeMode(false);
     setService(null);
     setPlaylists([]);
     setAlbums([]);
@@ -856,7 +958,7 @@ export default function App() {
     setPositionMs(0);
     setDataError(null);
     setNav([{ screen: 'login', index: 0 }]);
-  }, [audio]);
+  }, [audio, youtube]);
 
   // ── Lyrics ────────────────────────────────────────────────
 
@@ -955,10 +1057,11 @@ export default function App() {
   // Entry-gate rows, capability-driven (free no-login first → demo → sign-in).
   const entrySources = useMemo(() => buildEntrySources(PROVIDERS), []);
 
-  // Switch to a login-less source (demo/audius), resetting any current playback.
+  // Switch to a login-less source (demo/audius/youtube), resetting playback.
   const switchSource = useCallback(
-    (target: 'demo' | 'audius') => {
+    (target: 'demo' | 'audius' | 'youtube') => {
       audio.stop();
+      youtube.stop();
       setCurrentTrack(null);
       setIsPlaying(false);
       setPositionMs(0);
@@ -969,18 +1072,27 @@ export default function App() {
         localStorage.setItem('demo_mode', '1');
         localStorage.removeItem('source');
         setIsAudiusMode(false);
+        setIsYouTubeMode(false);
         setIsDemoMode(true);
         setService(createMockService());
-      } else {
+      } else if (target === 'audius') {
         localStorage.setItem('source', 'audius');
         localStorage.removeItem('demo_mode');
         setIsDemoMode(false);
+        setIsYouTubeMode(false);
         setIsAudiusMode(true);
         setService(createAudiusService());
+      } else {
+        localStorage.setItem('source', 'youtube');
+        localStorage.removeItem('demo_mode');
+        setIsDemoMode(false);
+        setIsAudiusMode(false);
+        setIsYouTubeMode(true);
+        setService(createYouTubeService());
       }
       setNav([{ screen: 'mainMenu', index: 0 }]);
     },
-    [audio]
+    [audio, youtube]
   );
 
   // ── Select action (takes explicit index to avoid stale closure) ──
@@ -993,11 +1105,14 @@ export default function App() {
           if (!src) break;
           if (src.id === 'audius') {
             switchSource('audius');
+          } else if (src.id === 'youtube') {
+            switchSource('youtube');
           } else if (src.id === 'demo') {
             switchSource('demo');
           } else if (src.id === 'spotify') {
             setIsDemoMode(false);
             setIsAudiusMode(false);
+            setIsYouTubeMode(false);
             redirectToSpotifyLogin();
           }
           break;
@@ -1023,22 +1138,27 @@ export default function App() {
             switchSource('demo');
           } else if (p.id === 'audius') {
             switchSource('audius');
+          } else if (p.id === 'youtube') {
+            switchSource('youtube');
           } else if (p.id === 'spotify') {
             if (accessToken) {
               // Already authenticated — switch the active service back to Spotify.
               localStorage.removeItem('demo_mode');
               localStorage.removeItem('source');
               audio.stop();
+              youtube.stop();
               setCurrentTrack(null);
               setIsPlaying(false);
               setPositionMs(0);
               setIsDemoMode(false);
               setIsAudiusMode(false);
+              setIsYouTubeMode(false);
               setService(createSpotifyService(resolveSpotifyToken));
               setNav([{ screen: 'mainMenu', index: 0 }]);
             } else {
               setIsDemoMode(false);
               setIsAudiusMode(false);
+              setIsYouTubeMode(false);
               redirectToSpotifyLogin();
             }
           }
@@ -1137,7 +1257,7 @@ export default function App() {
       loadPlaylistTracks, loadAlbumTracks,
       loadRecentlyPlayed, loadTrending, playFromList, playContext, openLyrics, toggleShuffle,
       cycleRepeat, toggleTheme, signOut, handleSearchKey, accessToken,
-      activeProviderId, musicMenuItems, artistMenuItems, switchSource, audio, resolveSpotifyToken,
+      activeProviderId, musicMenuItems, artistMenuItems, switchSource, audio, youtube, resolveSpotifyToken,
       entrySources,
     ]
   );
@@ -1215,6 +1335,17 @@ export default function App() {
 
   const screenTitle = currentScreen === 'tracks' ? tracksTitle : SCREEN_TITLES[currentScreen];
 
+  // YouTube's ToS expects the IFrame player to stay visible during playback
+  // (not audio-only/hidden). So while a YouTube video is loaded we show it large
+  // over the Now Playing album-art region, and elsewhere keep it as a small
+  // visible thumbnail; it is only fully hidden when nothing is playing.
+  const ytStageClass =
+    isYouTube && currentTrack
+      ? currentScreen === 'nowPlaying'
+        ? 'yt-stage--np'
+        : 'yt-stage--mini'
+      : 'yt-stage--hidden';
+
   // ── Render ────────────────────────────────────────────────
 
   return (
@@ -1243,12 +1374,20 @@ export default function App() {
                   isPlaying={isPlaying}
                   positionMs={positionMs}
                   volume={volume}
-                  volumeControllable={isAudius ? audio.volumeControllable : volumeControllable}
+                  volumeControllable={
+                    isAudius
+                      ? audio.volumeControllable
+                      : isYouTube
+                        ? youtube.volumeControllable
+                        : volumeControllable
+                  }
                   shuffle={shuffle}
                   repeat={repeat}
                   theme={theme}
-                  isPlayerReady={isAudius ? true : isReady}
-                  playerError={isAudius ? audio.audioError : playerError}
+                  isPlayerReady={isAudius || isYouTube ? true : isReady}
+                  playerError={
+                    isAudius ? audio.audioError : isYouTube ? youtube.playerError : playerError
+                  }
                   searchQuery={searchQuery}
                   dataError={dataError}
                   activeProviderId={activeProviderId}
@@ -1261,6 +1400,12 @@ export default function App() {
                   onSearchSubmit={submitSearch}
                 />
               )}
+              {/* Persistent YouTube IFrame host — always mounted so playback
+                  survives navigation; positioning/visibility is class-driven
+                  (visible during playback per YouTube ToS). */}
+              <div className={`yt-stage ${ytStageClass}`}>
+                <div ref={youtube.hostRef} className="yt-stage-host" />
+              </div>
             </div>
           </div>
         </div>

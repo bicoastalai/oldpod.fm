@@ -670,6 +670,48 @@ body {
   height: 72px;
 }
 
+/* ── YouTube IFrame stage ──
+   YouTube's ToS expects the player to remain visible during playback, so it is
+   shown over the Now Playing album-art slot (and as a small thumbnail on other
+   screens) rather than hidden. The host stays mounted so playback survives
+   navigation; only `--hidden` (nothing playing) removes it. */
+.yt-stage {
+  position: absolute;
+  z-index: 6;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #000;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+.yt-stage-host,
+.yt-stage iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+}
+.yt-stage--hidden {
+  display: none;
+}
+/* Over the Now Playing album-art slot (matches .now-playing padding + art size). */
+.yt-stage--np {
+  top: 6px;
+  left: 8px;
+  width: 64px;
+  height: 64px;
+}
+.ipod-black .yt-stage--np {
+  width: 72px;
+  height: 72px;
+}
+/* Small visible thumbnail on other screens (kept visible, not hidden, for ToS). */
+.yt-stage--mini {
+  right: 4px;
+  bottom: 4px;
+  width: 72px;
+  height: 41px;
+}
+
 /* ── Lyrics screen ── */
 .lyrics-screen {
   height: 100%;
