@@ -10,14 +10,6 @@ interface Props {
   userScrolled: boolean;
 }
 
-function visibleLines<T>(items: T[], selectedIdx: number, windowSize = 5): [T[], number] {
-  const half = Math.floor(windowSize / 2);
-  let start = Math.max(0, selectedIdx - half);
-  const end = Math.min(items.length, start + windowSize);
-  start = Math.max(0, end - windowSize);
-  return [items.slice(start, end), selectedIdx - start];
-}
-
 const LyricsScreen: React.FC<Props> = ({
   lyrics,
   loading,
@@ -25,29 +17,52 @@ const LyricsScreen: React.FC<Props> = ({
   selectedIndex,
   userScrolled,
 }) => {
-  const listRef = useRef<HTMLUListElement>(null);
+  const lineRefs = useRef<(HTMLLIElement | null)[]>([]);
+  // -1 means "haven't scrolled for this lyric set yet" → first move jumps,
+  // later moves glide, so the active line visibly follows the music.
+  const lastScrolledIdx = useRef(-1);
 
-  const highlightIdx = useMemo(() => {
-    if (!lyrics?.lines.length) return 0;
-    return getLyricsHighlightIndex(
-      lyrics.lines,
-      positionMs,
-      selectedIndex,
-      userScrolled
-    );
-  }, [lyrics, positionMs, selectedIndex, userScrolled]);
+  const lines = lyrics?.lines ?? [];
 
-  const [visible, localHighlight] = useMemo(() => {
-    if (!lyrics?.lines.length) return [[], 0] as const;
-    return visibleLines(lyrics.lines, highlightIdx, 5);
-  }, [lyrics, highlightIdx]);
+  // Derive the active line from playback position (synced) or the user's wheel
+  // selection (plain lyrics / manual scroll). Cheap: a single pass over lines.
+  const activeIdx = useMemo(() => {
+    if (lines.length === 0) return 0;
+    return getLyricsHighlightIndex(lines, positionMs, selectedIndex, userScrolled);
+  }, [lines, positionMs, selectedIndex, userScrolled]);
 
-  const startOffset = highlightIdx - localHighlight;
+  // Build the list only when the lines or the active line change — not on every
+  // position tick — so a rapidly-updating positionMs doesn't re-render the list.
+  const items = useMemo(
+    () =>
+      lines.map((line, i) => (
+        <li
+          key={i}
+          ref={(el) => {
+            lineRefs.current[i] = el;
+          }}
+          className={`lyrics-line${i === activeIdx ? ' active' : ''}`}
+        >
+          {line.text}
+        </li>
+      )),
+    [lines, activeIdx]
+  );
 
+  // New lyric set (new track): reset the scroll baseline so the next scroll jumps.
   useEffect(() => {
-    const el = listRef.current?.querySelector('.lyrics-line.active');
-    el?.scrollIntoView({ block: 'nearest' });
-  }, [highlightIdx]);
+    lastScrolledIdx.current = -1;
+  }, [lyrics]);
+
+  // Keep the active line centered, gliding as it advances with the music.
+  useEffect(() => {
+    if (lines.length === 0) return;
+    const el = lineRefs.current[activeIdx];
+    if (!el) return;
+    const behavior: ScrollBehavior = lastScrolledIdx.current === -1 ? 'auto' : 'smooth';
+    el.scrollIntoView({ block: 'center', behavior });
+    lastScrolledIdx.current = activeIdx;
+  }, [activeIdx, lines.length]);
 
   if (loading) {
     return (
@@ -77,7 +92,7 @@ const LyricsScreen: React.FC<Props> = ({
     );
   }
 
-  if (lyrics.lines.length === 0) {
+  if (lines.length === 0) {
     return (
       <div className="lyrics-screen lyrics-screen--center">
         <span className="lyrics-empty">Lyrics not available</span>
@@ -86,19 +101,8 @@ const LyricsScreen: React.FC<Props> = ({
   }
 
   return (
-    <ul ref={listRef} className="lyrics-screen lyrics-list">
-      {visible.map((line, i) => {
-        const globalIdx = startOffset + i;
-        const isActive = globalIdx === highlightIdx;
-        return (
-          <li
-            key={globalIdx}
-            className={`lyrics-line${isActive ? ' active' : ''}`}
-          >
-            {line.text}
-          </li>
-        );
-      })}
+    <ul className="lyrics-screen lyrics-list" aria-label="Lyrics">
+      {items}
     </ul>
   );
 };

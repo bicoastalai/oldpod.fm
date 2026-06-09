@@ -692,12 +692,20 @@ body {
 .lyrics-list {
   list-style: none;
   margin: 0;
-  padding: 0;
+  /* Generous vertical padding lets the first and last lines scroll to the
+     centre, so the active line stays centred for the whole song. */
+  padding: 50% 8px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  height: 100%;
   gap: 2px;
+  height: 100%;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+}
+
+.lyrics-list::-webkit-scrollbar {
+  display: none;
 }
 
 .lyrics-line {

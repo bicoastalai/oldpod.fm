@@ -119,11 +119,7 @@ async function queryLrcLib(track: Track, cached: boolean): Promise<TrackLyrics |
   return null;
 }
 
-/**
- * Fetches lyrics for a track from LRCLib (cached first, then full lookup).
- * Demo tracks use embedded sample lyrics when available.
- */
-export async function fetchLyrics(track: Track, isDemoMode: boolean): Promise<TrackLyrics | null> {
+async function loadLyrics(track: Track, isDemoMode: boolean): Promise<TrackLyrics | null> {
   const mockKey = `${track.name}|${track.artist}`;
   if (isDemoMode && MOCK_LYRICS[mockKey]) {
     await new Promise((r) => setTimeout(r, 150));
@@ -137,4 +133,38 @@ export async function fetchLyrics(track: Track, isDemoMode: boolean): Promise<Tr
   } catch {
     return null;
   }
+}
+
+// Per-track, in-memory cache of resolved lyrics. Keyed by the track's identity
+// so navigating back to the same song (or prefetch + open racing) never
+// triggers a second network round-trip. We cache the in-flight promise to
+// de-dupe concurrent calls, but drop entries that resolve to no result so a
+// transient miss/error can be retried later.
+const lyricsCache = new Map<string, Promise<TrackLyrics | null>>();
+
+function cacheKey(track: Track): string {
+  return track.id || `${track.name}|${track.artist}|${track.album}|${track.durationMs}`;
+}
+
+/**
+ * Fetches lyrics for a track from LRCLib (cached first, then full lookup),
+ * memoised per track. Demo tracks use embedded sample lyrics when available.
+ *
+ * @example
+ *   const lyrics = await fetchLyrics(track, isDemoMode);
+ *   if (lyrics?.synced) renderTimedLines(lyrics.lines);
+ */
+export function fetchLyrics(track: Track, isDemoMode: boolean): Promise<TrackLyrics | null> {
+  const key = cacheKey(track);
+  const existing = lyricsCache.get(key);
+  if (existing) return existing;
+
+  const pending = loadLyrics(track, isDemoMode);
+  lyricsCache.set(key, pending);
+  void pending
+    .then((result) => {
+      if (result == null) lyricsCache.delete(key);
+    })
+    .catch(() => lyricsCache.delete(key));
+  return pending;
 }
