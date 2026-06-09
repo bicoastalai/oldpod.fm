@@ -8,7 +8,7 @@
  * registry entry plus an implementation — no UI changes required.
  *
  */
-export type ProviderId = 'demo' | 'spotify' | 'audius' | 'youtube' | 'radio';
+export type ProviderId = 'demo' | 'spotify' | 'audius' | 'youtube' | 'applemusic' | 'radio';
 
 export interface Track {
   id: string;

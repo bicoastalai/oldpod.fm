@@ -69,6 +69,21 @@ export const PROVIDERS: ProviderMeta[] = [
     },
   },
   {
+    id: 'applemusic',
+    label: 'Apple Music',
+    blurb: 'Your library & the full catalog',
+    status: 'ready',
+    capabilities: {
+      needsLogin: true,
+      needsPremiumForPlayback: true,
+      hasLibrary: true,
+      hasArtists: true,
+      hasArtistTopTracks: true,
+      hasSearch: true,
+      canSeek: true,
+    },
+  },
+  {
     id: 'radio',
     label: 'Radio',
     blurb: 'Live stations worldwide (coming soon)',
