@@ -9,7 +9,7 @@ export const PROVIDERS: ProviderMeta[] = [
   {
     id: 'demo',
     label: 'Demo',
-    blurb: 'Sample library — no account needed',
+    blurb: 'Built-in sample tracks',
     status: 'ready',
     capabilities: {
       needsLogin: false,
@@ -23,7 +23,7 @@ export const PROVIDERS: ProviderMeta[] = [
   {
     id: 'spotify',
     label: 'Spotify',
-    blurb: 'Your library — Premium required for playback',
+    blurb: 'Your playlists, albums & artists',
     status: 'ready',
     capabilities: {
       needsLogin: true,
@@ -37,7 +37,7 @@ export const PROVIDERS: ProviderMeta[] = [
   {
     id: 'audius',
     label: 'Audius',
-    blurb: 'Free & open — no login, indie catalog',
+    blurb: 'Open indie catalog, real audio',
     status: 'ready',
     capabilities: {
       needsLogin: false,
@@ -51,7 +51,7 @@ export const PROVIDERS: ProviderMeta[] = [
   {
     id: 'youtube',
     label: 'YouTube',
-    blurb: 'Huge free catalog — no login (coming soon)',
+    blurb: 'Big catalog (coming soon)',
     status: 'planned',
     capabilities: {
       needsLogin: false,

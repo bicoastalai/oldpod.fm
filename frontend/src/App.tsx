@@ -20,13 +20,13 @@ import type {
   Playlist,
   PlaySource,
   ProviderId,
+  ProviderMeta,
   RepeatMode,
   Track,
 } from './services/providers/types';
 import {
   exchangeCodeForToken,
   getRedirectUriWarning,
-  getSpotifyRedirectUri,
   getStoredToken,
   logout,
   refreshAccessToken,
@@ -114,6 +114,49 @@ function pickNextIndex(curr: number, len: number, shuffle: boolean): number {
 
 function repeatLabel(mode: RepeatMode): string {
   return mode === 'off' ? 'Off' : mode === 'context' ? 'All' : 'One';
+}
+
+// A row on the "Choose your music" entry gate, derived from a provider's
+// capabilities (see `buildEntrySources`).
+interface EntrySource {
+  id: ProviderId;
+  label: string;
+  /** Sets expectations by requirement, not marketing (e.g. "No account needed"). */
+  requirement: string;
+  /** Drives ordering/grouping: no-login real sources lead, demo, then sign-in. */
+  group: 'free' | 'demo' | 'signin';
+}
+
+// Requirement phrasing shared by the entry gate and the Sources screen so the
+// two stay in sync. Speaks to what the user needs, not Free/Premium marketing.
+function requirementLabel(p: ProviderMeta): string {
+  if (p.id === 'demo') return 'No account needed';
+  if (p.capabilities.needsLogin) {
+    return p.capabilities.needsPremiumForPlayback ? 'Sign in required · Premium to play' : 'Sign in required';
+  }
+  return 'No account needed';
+}
+
+// Entry-gate copy: leads with value, labels Demo honestly as a tire-kicker.
+function entryRequirement(p: ProviderMeta): string {
+  if (p.id === 'demo') return 'Just looking · sample tracks';
+  if (p.capabilities.needsLogin) {
+    return p.capabilities.needsPremiumForPlayback ? 'Sign in · Premium to play' : 'Sign in required';
+  }
+  return 'No account needed';
+}
+
+// Build the entry gate dynamically from the registry: free no-login real
+// sources first (Audius), Demo next (clearly a sample), sign-in sources last.
+// Planned sources stay off the gate to avoid clutter.
+function buildEntrySources(providers: ProviderMeta[]): EntrySource[] {
+  const ready = providers.filter((p) => p.status === 'ready');
+  const group = (p: ProviderMeta): EntrySource['group'] =>
+    p.id === 'demo' ? 'demo' : p.capabilities.needsLogin ? 'signin' : 'free';
+  const order: Record<EntrySource['group'], number> = { free: 0, demo: 1, signin: 2 };
+  return ready
+    .map((p) => ({ id: p.id, label: p.label, requirement: entryRequirement(p), group: group(p) }))
+    .sort((a, b) => order[a.group] - order[b.group]);
 }
 
 // ── App ────────────────────────────────────────────────────
@@ -876,6 +919,9 @@ export default function App() {
     return items;
   }, [activeProviderId, service]);
 
+  // Entry-gate rows, capability-driven (free no-login first → demo → sign-in).
+  const entrySources = useMemo(() => buildEntrySources(PROVIDERS), []);
+
   // Switch to a login-less source (demo/audius), resetting any current playback.
   const switchSource = useCallback(
     (target: 'demo' | 'audius') => {
@@ -910,15 +956,16 @@ export default function App() {
     (idx: number) => {
       switch (currentScreen) {
         case 'login': {
-          if (idx === 0) {
+          const src = entrySources[idx];
+          if (!src) break;
+          if (src.id === 'audius') {
+            switchSource('audius');
+          } else if (src.id === 'demo') {
+            switchSource('demo');
+          } else if (src.id === 'spotify') {
             setIsDemoMode(false);
+            setIsAudiusMode(false);
             redirectToSpotifyLogin();
-          } else {
-            localStorage.setItem('demo_mode', '1');
-            setIsDemoMode(true);
-            setAccessToken(null);
-            setService(createMockService());
-            setNav([{ screen: 'mainMenu', index: 0 }]);
           }
           break;
         }
@@ -1056,6 +1103,7 @@ export default function App() {
       loadRecentlyPlayed, loadTrending, playFromList, playContext, openLyrics, toggleShuffle,
       cycleRepeat, toggleTheme, signOut, handleSearchKey, accessToken,
       activeProviderId, musicMenuItems, switchSource, audio, resolveSpotifyToken,
+      entrySources,
     ]
   );
 
@@ -1090,7 +1138,7 @@ export default function App() {
     // be deps so the wheel sees freshly-loaded lists (else it clamps to length 0).
     [
       currentScreen, seekBy, moveSelection, lyrics,
-      playlists, albums, artists, tracks, trackSource, musicMenuItems,
+      playlists, albums, artists, tracks, trackSource, musicMenuItems, entrySources,
     ]
   );
 
@@ -1109,7 +1157,7 @@ export default function App() {
 
   function getListLength(screen: Screen): number {
     switch (screen) {
-      case 'login': return 2;
+      case 'login': return entrySources.length;
       case 'mainMenu': return MAIN_MENU.length;
       case 'music': return musicMenuItems.length;
       case 'settings': return SETTINGS_MENU.length;
@@ -1148,6 +1196,7 @@ export default function App() {
                 <ScreenContent
                   screen={currentScreen}
                   selectedIndex={selectedIndex}
+                  entrySources={entrySources}
                   mainMenu={MAIN_MENU}
                   musicMenu={musicMenuItems.map((m) => m.label)}
                   playlists={playlists}
@@ -1192,6 +1241,7 @@ export default function App() {
 interface ScreenProps {
   screen: Screen;
   selectedIndex: number;
+  entrySources: EntrySource[];
   mainMenu: string[];
   musicMenu: string[];
   playlists: Playlist[];
@@ -1225,7 +1275,13 @@ function ScreenContent(props: ScreenProps) {
 
   switch (screen) {
     case 'login':
-      return <LoginScreen selectedIndex={selectedIndex} onItemClick={onItemClick} />;
+      return (
+        <LoginScreen
+          sources={props.entrySources}
+          selectedIndex={selectedIndex}
+          onItemClick={onItemClick}
+        />
+      );
     case 'mainMenu':
       return (
         <MenuScreen
@@ -1372,8 +1428,15 @@ function ScreenContent(props: ScreenProps) {
 
 // ── Login screen ───────────────────────────────────────────
 
-function LoginScreen({ selectedIndex, onItemClick }: { selectedIndex: number; onItemClick: (i: number) => void }) {
-  const redirectUri = getSpotifyRedirectUri();
+function LoginScreen({
+  sources,
+  selectedIndex,
+  onItemClick,
+}: {
+  sources: EntrySource[];
+  selectedIndex: number;
+  onItemClick: (i: number) => void;
+}) {
   const redirectWarning = getRedirectUriWarning();
 
   return (
@@ -1383,25 +1446,37 @@ function LoginScreen({ selectedIndex, onItemClick }: { selectedIndex: number; on
         {redirectWarning ? (
           <p className="login-sub login-sub--warn">{redirectWarning}</p>
         ) : (
-          <p className="login-sub">
-            Spotify redirect URI:
-            <br />
-            <span className="login-uri">{redirectUri}</span>
-          </p>
+          <p className="login-sub">Choose your music</p>
         )}
       </div>
-      <ul className="menu-list">
-        {['Login with Spotify', 'Demo Mode'].map((label, i) => (
+      <ul className="menu-list" aria-label="Choose a music source">
+        {sources.map((s, i) => (
           <li
-            key={label}
+            key={s.id}
             className={`menu-item${i === selectedIndex ? ' selected' : ''}`}
             onClick={() => onItemClick(i)}
             style={{ cursor: 'pointer' }}
+            aria-label={`${s.label} — ${s.requirement}`}
           >
-            <span className="menu-item-text">{label}</span>
+            <span className="menu-item-text">{s.label}</span>
+            <span style={{ fontSize: '9px', opacity: 0.65, marginRight: '4px', flexShrink: 0 }}>
+              {s.requirement}
+            </span>
+            <span className="chevron">›</span>
           </li>
         ))}
       </ul>
+      <div
+        style={{
+          padding: '3px 8px',
+          fontSize: '8px',
+          textAlign: 'center',
+          color: '#666',
+          borderTop: '1px solid rgba(0,0,0,0.08)',
+        }}
+      >
+        More sources in Main Menu › Sources
+      </div>
     </div>
   );
 }
@@ -1422,8 +1497,11 @@ function SourcesScreen({
   const badge = (p: (typeof PROVIDERS)[number]) => {
     if (p.id === activeProviderId) return 'Active';
     if (p.status === 'planned') return 'Soon';
-    return 'Switch';
+    return p.capabilities.needsLogin ? 'Sign in' : 'No login';
   };
+
+  const selected = PROVIDERS[selectedIndex];
+  const footer = note ?? (selected ? `${requirementLabel(selected)} · ${selected.blurb}` : '');
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -1452,14 +1530,10 @@ function SourcesScreen({
           minHeight: '28px',
         }}
       >
-        {note ?? PROVIDERS.find((p) => p.id === selectedIndexProvider(selectedIndex))?.blurb}
+        {footer}
       </div>
     </div>
   );
-}
-
-function selectedIndexProvider(idx: number): ProviderId | undefined {
-  return PROVIDERS[idx]?.id;
 }
 
 // ── Generic menu list ──────────────────────────────────────
