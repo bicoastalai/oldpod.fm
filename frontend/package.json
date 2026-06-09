@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "autoprefixer": "^10.5.0",
+    "jose": "^5.10.0",
     "react": "^18.0.0",
     "react-dom": "^18.0.0"
   },
