@@ -26,6 +26,7 @@ It's a **frontend-only** app: authentication uses Spotify's PKCE flow directly f
 - **Themes**: iPod Classic black (default) or white 5th-gen — Settings → Theme
 - **PWA**: installable to your home screen, works offline for the app shell
 - **Demo Mode**: a built-in mock catalog — no login required
+- **Free, no-login sources**: Audius (open indie catalog) and YouTube (huge catalog, real video) — no account needed
 - Spotify login via PKCE (no client secret, no backend)
 
 ---
@@ -100,6 +101,48 @@ npm run dev
 
 Open **http://127.0.0.1:5173**. The port is fixed (`strictPort`) so it always
 matches your registered redirect URI.
+
+### 6. (Optional) Enable YouTube — free, no login
+
+YouTube is a free, login-less source backed by the **YouTube Data API v3** for
+search/trending and the **YouTube IFrame Player API** for playback. It is fully
+optional: without a key the rest of the app works normally and YouTube simply
+shows a friendly *"YouTube needs an API key (not configured)"* message.
+
+To turn it on:
+
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/) and
+   create (or pick) a project.
+2. **APIs & Services → Library →** enable **"YouTube Data API v3"**.
+3. **APIs & Services → Credentials → Create credentials → API key.**
+4. Restrict the key (recommended) → **Application restrictions → HTTP referrers**,
+   and add:
+
+   ```
+   https://oldpod.online/*
+   https://www.oldpod.online/*
+   http://127.0.0.1:5173/*
+   http://localhost:5173/*
+   ```
+
+   Optionally also restrict it under **API restrictions** to just *YouTube Data
+   API v3*.
+5. Add the key to `frontend/.env.local` (or `.env`):
+
+   ```
+   VITE_YOUTUBE_API_KEY=your_youtube_api_key_here
+   ```
+
+6. For production, add the same `VITE_YOUTUBE_API_KEY` in
+   **Vercel → Project → Settings → Environment Variables** and redeploy.
+
+> **Quota note:** the YouTube Data API has a free quota of **10,000 units/day**.
+> A `search` call costs ~100 units, so heavy searching can exhaust the daily
+> quota; when that happens YouTube shows *"YouTube's daily limit was reached —
+> try again later."* and the other sources keep working.
+
+> Playback is the official YouTube IFrame player, kept **visible** in Now Playing
+> (the album-art region becomes the video) to comply with YouTube's Terms.
 
 ---
 
@@ -211,6 +254,8 @@ Your Spotify user must still be listed under **User Management** (Development Mo
 - [x] Dark mode / classic black iPod skin
 - [x] PWA support for home screen install
 - [x] Synced lyrics (LRCLib) on Now Playing
+- [x] Audius as a free, no-login source
+- [x] YouTube as a free, no-login source (Data API + IFrame player)
 - [ ] Artist browsing
 - [ ] Cover Flow album view
 - [ ] Genius-style on-the-go playlists
