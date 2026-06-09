@@ -63,6 +63,13 @@ export interface ProviderCapabilities {
   hasLibrary: boolean;
   /** Exposes artist browsing (followed/top artists → albums/top tracks). */
   hasArtists: boolean;
+  /**
+   * Exposes an artist's "top tracks" within artist browsing. Separate from
+   * `hasArtists` because Spotify removed `GET /artists/{id}/top-tracks` for
+   * Development Mode apps (Feb 2026 migration) — the artist list still works,
+   * but drilling into top tracks returns 403, so it must be hidden there.
+   */
+  hasArtistTopTracks: boolean;
   /** Supports text search. */
   hasSearch: boolean;
   /** Playback position can be seeked (false for live radio streams). */

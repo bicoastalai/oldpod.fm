@@ -180,20 +180,34 @@ export function createMockService(): SpotifyService {
 
 export type SpotifyTokenProvider = () => Promise<string | null>;
 
-/** Error carrying the HTTP status so callers can branch on 403/404 etc. */
+/**
+ * Error carrying the HTTP status so callers can branch on 403/404 etc. It also
+ * remembers which endpoint failed and any machine-readable `reason` from
+ * Spotify's error body, so `describeDataError` can tell a scope problem apart
+ * from a Development-Mode allowlist / Premium problem (all of which surface as
+ * 403 but need very different user actions).
+ */
 export class SpotifyApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** The Web API path that failed, e.g. "/me/top/artists" (no query string). */
+  path?: string;
+  /** Spotify's `error.reason` code from the response body, when present. */
+  reason?: string;
+  constructor(status: number, message: string, opts: { path?: string; reason?: string } = {}) {
     super(message);
     this.name = 'SpotifyApiError';
     this.status = status;
+    this.path = opts.path;
+    this.reason = opts.reason;
   }
 }
 
 export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifyService {
   const request = async (path: string, opts: RequestInit = {}) => {
+    // Strip the query string so the error carries a stable endpoint identity.
+    const endpoint = path.split('?')[0];
     const token = await getToken();
-    if (!token) throw new SpotifyApiError(401, 'Not logged in to Spotify');
+    if (!token) throw new SpotifyApiError(401, 'Not logged in to Spotify', { path: endpoint });
     const res = await fetch(`https://api.spotify.com/v1${path}`, {
       ...opts,
       headers: {
@@ -204,8 +218,17 @@ export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifySer
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const msg = (data as { error?: { message?: string } })?.error?.message;
-      throw new SpotifyApiError(res.status, msg ?? `Spotify API error (${res.status})`);
+      const err = (data as { error?: { message?: string; reason?: string } })?.error;
+      const message = err?.message ?? `Spotify API error (${res.status})`;
+      // Log the verbatim status/path/message/reason so the exact cause is
+      // observable in the console/network even when the UI shows guidance.
+      console.warn(
+        `[spotify] ${res.status} ${endpoint} — ${message}${err?.reason ? ` (reason: ${err.reason})` : ''}`
+      );
+      throw new SpotifyApiError(res.status, message, {
+        path: endpoint,
+        reason: err?.reason,
+      });
     }
     return data;
   };
@@ -324,10 +347,23 @@ export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifySer
     },
 
     async getArtists() {
-      // Merge followed artists with the user's top artists, deduped by id.
+      // Merge followed artists with the user's top artists, deduped by id. Each
+      // call is tolerated on its own so one succeeding still yields results, but
+      // we remember the first failure: if BOTH come back empty because of it,
+      // we rethrow so the UI can explain it (typically a missing scope on tokens
+      // minted before the Artists feature added user-follow-read/user-top-read).
+      let firstError: unknown = null;
+      const tolerate = async (p: Promise<any>) => {
+        try {
+          return await p;
+        } catch (e) {
+          firstError ??= e;
+          return {};
+        }
+      };
       const [followed, top] = await Promise.all([
-        request('/me/following?type=artist&limit=50').catch(() => ({})),
-        request('/me/top/artists?limit=50').catch(() => ({})),
+        tolerate(request('/me/following?type=artist&limit=50')),
+        tolerate(request('/me/top/artists?limit=50')),
       ]);
       const rows = [
         ...((followed as any).artists?.items ?? []),
@@ -345,6 +381,7 @@ export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifySer
           image: a.images?.[0]?.url ?? null,
         });
       }
+      if (out.length === 0 && firstError) throw firstError;
       out.sort((a, b) => a.name.localeCompare(b.name));
       return out;
     },
@@ -488,15 +525,54 @@ export function createSpotifyService(getToken: SpotifyTokenProvider): SpotifySer
   };
 }
 
+// Spotify endpoints whose 403 almost always means a *missing scope* rather than
+// app access. These need scopes (user-follow-read / user-top-read /
+// user-read-recently-played) that were added when the Artists feature shipped,
+// so tokens minted earlier must be re-consented (Sign Out → sign in again).
+const SCOPE_GATED_PATHS = ['/me/following', '/me/top', '/me/player/recently-played'];
+
+// Catalog endpoints Spotify removed for Development Mode apps (Feb 2026
+// migration). These 403 regardless of account/allowlist, so the UI hides the
+// features that use them — but if one is ever hit, say so accurately.
+const REMOVED_PATHS = ['top-tracks', '/browse/new-releases', '/browse/categories'];
+
 /**
- * Turn a caught data-load error into a message a non-technical visitor can act
- * on. The common case is a 403 when the app is in Spotify "Development Mode"
- * and the signed-in account isn't on the 25-user allowlist.
+ * Turn a caught data-load error into a short, actionable message a non-technical
+ * visitor can follow. A Spotify 403 can mean three very different things, so we
+ * use the failed endpoint (`SpotifyApiError.path`) plus the response body's
+ * `reason`/`message` to tell them apart:
+ *
+ *  - missing scope (e.g. /me/following, /me/top)  → re-consent via Sign Out
+ *  - app owner has no Spotify Premium (Dev Mode)  → owner must enable Premium
+ *  - account not on the Dev-Mode allowlist        → owner must add that account
  */
 export function describeDataError(e: unknown, fallback: string): string {
   if (e instanceof SpotifyApiError) {
     if (e.status === 403) {
-      return "This app is in Spotify's limited-access mode. Ask the owner to add your Spotify account email to the allowlist, then sign in again.";
+      const signal = `${e.reason ?? ''} ${e.message ?? ''}`.toLowerCase();
+      const path = e.path ?? '';
+
+      // Owner-account Premium requirement (Spotify Dev Mode, since Mar 2026):
+      // every API call 403s for everyone — including the owner — until the app
+      // owner's own Spotify account has an active Premium subscription.
+      if (signal.includes('premium')) {
+        return "This Spotify app is in Development Mode, which now requires the app owner's account to have Spotify Premium. The owner needs to turn on Premium.";
+      }
+
+      // Missing scope: the token predates a permission this feature needs.
+      if (signal.includes('scope') || SCOPE_GATED_PATHS.some((p) => path.startsWith(p))) {
+        return 'New Spotify permissions are needed for this. Open Settings → Sign Out, then sign in again to grant them.';
+      }
+
+      // Endpoint Spotify removed for Dev Mode apps — not an account problem.
+      if (REMOVED_PATHS.some((p) => path.includes(p))) {
+        return 'Spotify removed this from its API for apps in Development Mode, so it is unavailable here.';
+      }
+
+      // App access / allowlist: the exact account that signed in isn't approved.
+      // The dashboard owner is NOT automatically allowlisted, and it must be the
+      // same account they actually logged in with.
+      return 'This Spotify app is in Development Mode. The exact account you signed in with must be added by the owner (Spotify Dashboard → User Management), then sign in again.';
     }
     if (e.status === 401) {
       return 'Your Spotify session expired — sign out and sign in again.';

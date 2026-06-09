@@ -60,7 +60,6 @@ interface NavEntry {
 }
 
 const MAIN_MENU = ['Music', 'Search', 'Now Playing', 'Sources', 'Settings'];
-const ARTIST_MENU = ['Top Tracks', 'Albums'];
 
 // The Music submenu is built from the active source's capabilities (see
 // `musicMenuItems`); `kind` maps a row to its loader in `doSelect`.
@@ -68,6 +67,14 @@ type MusicMenuKind = 'playlists' | 'albums' | 'artists' | 'recent' | 'trending';
 interface MusicMenuEntry {
   label: string;
   kind: MusicMenuKind;
+}
+// The artist drill-down is likewise capability-driven: "Top Tracks" only
+// appears for sources that still expose it (Spotify Dev Mode 403s it), while
+// "Albums" stays (see `artistMenuItems`).
+type ArtistMenuKind = 'topTracks' | 'albums';
+interface ArtistMenuEntry {
+  label: string;
+  kind: ArtistMenuKind;
 }
 const SETTINGS_MENU = ['Shuffle', 'Repeat', 'Theme', 'About', 'Sign Out'];
 
@@ -853,29 +860,43 @@ export default function App() {
 
   // ── Lyrics ────────────────────────────────────────────────
 
+  // Prefetch lyrics as soon as a track becomes current — not only when the
+  // Lyrics screen opens — so they're usually ready by the time the user looks.
+  // The service memoises per track, so opening the screen reuses this fetch.
   useEffect(() => {
-    if (currentTrack?.id !== lyricsTrackIdRef.current) {
+    const track = currentTrack;
+    if (!track) {
       setLyrics(null);
       lyricsTrackIdRef.current = null;
+      return;
     }
-  }, [currentTrack?.id]);
+    if (lyricsTrackIdRef.current === track.id) return;
+
+    setLyrics(null);
+    setLyricsUserScrolled(false);
+    setLyricsLoading(true);
+    let cancelled = false;
+    fetchLyrics(track, isDemoMode)
+      .then((data) => {
+        if (cancelled) return;
+        setLyrics(data);
+        lyricsTrackIdRef.current = track.id;
+      })
+      .finally(() => {
+        if (!cancelled) setLyricsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack?.id, isDemoMode]);
 
   const openLyrics = useCallback(() => {
     if (!currentTrack) return;
     push('lyrics');
     setLyricsUserScrolled(false);
     setIndex(0);
-
-    if (lyricsTrackIdRef.current === currentTrack.id) return;
-
-    setLyricsLoading(true);
-    fetchLyrics(currentTrack, isDemoMode)
-      .then((data) => {
-        setLyrics(data);
-        lyricsTrackIdRef.current = currentTrack.id;
-      })
-      .finally(() => setLyricsLoading(false));
-  }, [currentTrack, isDemoMode, push, setIndex]);
+  }, [currentTrack, push, setIndex]);
 
   // ── Search key handling ──────────────────────────────────
 
@@ -916,6 +937,18 @@ export default function App() {
     if (caps?.hasArtists) items.push({ label: 'Artists', kind: 'artists' });
     if (caps?.hasLibrary) items.push({ label: 'Recently Played', kind: 'recent' });
     if (service?.getTrending) items.push({ label: 'Trending', kind: 'trending' });
+    return items;
+  }, [activeProviderId, service]);
+
+  // Artist drill-down menu, capability-driven. Spotify removed top-tracks for
+  // Dev Mode apps (Feb 2026), so it's hidden there while "Albums" remains.
+  const artistMenuItems = useMemo<ArtistMenuEntry[]>(() => {
+    const caps = getProviderMeta(activeProviderId)?.capabilities;
+    const items: ArtistMenuEntry[] = [];
+    if (caps?.hasArtistTopTracks && service?.getArtistTopTracks) {
+      items.push({ label: 'Top Tracks', kind: 'topTracks' });
+    }
+    if (service?.getArtistAlbums) items.push({ label: 'Albums', kind: 'albums' });
     return items;
   }, [activeProviderId, service]);
 
@@ -1043,10 +1076,12 @@ export default function App() {
         }
         case 'artist': {
           if (!selectedArtist) break;
-          if (idx === 0) {
+          const item = artistMenuItems[idx];
+          if (!item) break;
+          if (item.kind === 'topTracks') {
             push('tracks');
             void loadArtistTopTracks(selectedArtist);
-          } else if (idx === 1) {
+          } else if (item.kind === 'albums') {
             push('albums');
             void loadArtistAlbums(selectedArtist);
           }
@@ -1102,7 +1137,7 @@ export default function App() {
       loadPlaylistTracks, loadAlbumTracks,
       loadRecentlyPlayed, loadTrending, playFromList, playContext, openLyrics, toggleShuffle,
       cycleRepeat, toggleTheme, signOut, handleSearchKey, accessToken,
-      activeProviderId, musicMenuItems, switchSource, audio, resolveSpotifyToken,
+      activeProviderId, musicMenuItems, artistMenuItems, switchSource, audio, resolveSpotifyToken,
       entrySources,
     ]
   );
@@ -1138,7 +1173,7 @@ export default function App() {
     // be deps so the wheel sees freshly-loaded lists (else it clamps to length 0).
     [
       currentScreen, seekBy, moveSelection, lyrics,
-      playlists, albums, artists, tracks, trackSource, musicMenuItems, entrySources,
+      playlists, albums, artists, tracks, trackSource, musicMenuItems, artistMenuItems, entrySources,
     ]
   );
 
@@ -1165,7 +1200,7 @@ export default function App() {
       case 'playlists': return playlists.length;
       case 'albums': return albums.length;
       case 'artists': return artists.length;
-      case 'artist': return ARTIST_MENU.length;
+      case 'artist': return artistMenuItems.length;
       case 'tracks':
         // Empty list + a context still offers one selectable "Play" row.
         if (tracks.length === 0 && trackSource && 'contextUri' in trackSource) return 1;
@@ -1199,6 +1234,7 @@ export default function App() {
                   entrySources={entrySources}
                   mainMenu={MAIN_MENU}
                   musicMenu={musicMenuItems.map((m) => m.label)}
+                  artistMenu={artistMenuItems.map((m) => m.label)}
                   playlists={playlists}
                   albums={albums}
                   artists={artists}
@@ -1244,6 +1280,7 @@ interface ScreenProps {
   entrySources: EntrySource[];
   mainMenu: string[];
   musicMenu: string[];
+  artistMenu: string[];
   playlists: Playlist[];
   albums: Album[];
   artists: Artist[];
@@ -1323,7 +1360,7 @@ function ScreenContent(props: ScreenProps) {
     case 'artist':
       return (
         <MenuScreen
-          items={ARTIST_MENU.map((label) => ({ label, arrow: true }))}
+          items={props.artistMenu.map((label) => ({ label, arrow: true }))}
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
         />
