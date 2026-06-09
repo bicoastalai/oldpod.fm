@@ -8,7 +8,7 @@ A classic iPod interface powered by Spotify. Built with React, TypeScript, Vite,
 
 OldPod.fm recreates the 5th generation iPod experience in the browser. Click wheel navigation, retro LCD screen, album art, and full playback control, all wired to your Spotify account. There's also a **Demo Mode** so you can explore the whole interface without a Spotify account.
 
-It's a **frontend-only** app: authentication uses Spotify's PKCE flow directly from the browser, so there is no backend and no client secret to manage.
+It's an almost entirely **frontend** app: Spotify authentication uses the PKCE flow directly from the browser (no client secret). The one exception is Apple Music, which needs a tiny Vercel **serverless function** to mint its developer token server-side (the Apple signing key must never reach the browser). Every other source is fully client-side.
 
 ---
 
@@ -27,6 +27,7 @@ It's a **frontend-only** app: authentication uses Spotify's PKCE flow directly f
 - **PWA**: installable to your home screen, works offline for the app shell
 - **Demo Mode**: a built-in mock catalog — no login required
 - **Free, no-login sources**: Audius (open indie catalog) and YouTube (huge catalog, real video) — no account needed
+- **Apple Music** (premium, logged-in): your library + full catalog via MusicKit JS, with a 30-second preview fallback for non-subscribers
 - Spotify login via PKCE (no client secret, no backend)
 
 ---
@@ -144,6 +145,61 @@ To turn it on:
 > Playback is the official YouTube IFrame player, kept **visible** in Now Playing
 > (the album-art region becomes the video) to comply with YouTube's Terms.
 
+### 7. (Optional) Enable Apple Music — premium, logged-in
+
+Apple Music is a premium, full-catalog source. It uses **MusicKit JS v3** in the
+browser (search, library, playback) plus the app's **first serverless function**
+(`api/apple-developer-token.ts`) to mint a short-lived, ES256-signed **developer
+token**. The signing key (`.p8`) is read only on the server and never reaches the
+browser. Like YouTube it is fully optional: without the server secrets the rest
+of the app works normally and Apple Music shows a friendly *"Apple Music isn't
+set up yet."* message.
+
+How it degrades and plays:
+
+- **No server secrets** → the token endpoint returns `503 { "error": "Apple
+  Music not configured" }`, and Apple Music surfaces the graceful "not set up"
+  state instead of crashing.
+- **Subscriber** → full-catalog DRM playback through MusicKit.
+- **Authorized but no subscription** → automatic fallback to 30-second **preview
+  URLs** (played via the same `<audio>` element other sources use). The DRM and
+  preview streams are never co-mingled.
+
+**Owner setup — do this once:**
+
+1. **Apple Developer Program membership** is required (paid).
+2. In the [Apple Developer portal](https://developer.apple.com/account) →
+   **Certificates, Identifiers & Profiles → Identifiers → Media IDs (MusicKit)**:
+   create a **MusicKit identifier** (Media ID).
+3. **Keys → +** → enable **MusicKit** → register. **Download the `.p8` file**
+   (you can only download it once) and note the **Key ID** (10 chars).
+4. Find your **Team ID** (10 chars) in the Apple Developer **Membership** page
+   (top-right account → Membership details).
+5. Set these in **Vercel → Project → Settings → Environment Variables**
+   (Production, and Preview if you use it) — **unprefixed**, never committed:
+
+   ```
+   APPLE_TEAM_ID=your_10_char_team_id
+   APPLE_KEY_ID=your_10_char_music_key_id
+   APPLE_PRIVATE_KEY=<contents of the .p8 file>
+   ```
+
+   `APPLE_PRIVATE_KEY` accepts the raw PEM (`-----BEGIN PRIVATE KEY----- … -----END
+   PRIVATE KEY-----`). If your environment mangles newlines, a **base64** encoding
+   of the PEM is also accepted. Then **redeploy**.
+6. For **local** Apple Music testing, run `vercel dev` (so `/api/...` is served)
+   and put the same three vars in `frontend/.env.local`. Plain `npm run dev`
+   (Vite) does **not** serve serverless functions, so Apple Music will show the
+   "not set up" state locally under `vite` — that's expected.
+7. **Privacy & Terms:** host the Privacy Policy and Terms on **bicoastalai.com**
+   (the app links to `https://bicoastalai.com/privacy` and `.../terms` from the
+   entry gate footer and **Settings → Privacy & Terms**). Adjust the exact paths
+   in `frontend/src/App.tsx` (`LEGAL_PRIVACY_URL` / `LEGAL_TERMS_URL`) if needed.
+
+> **Token security:** the developer token is the only Apple value the browser
+> ever sees, and it's a short-lived (12h) JWT minted on demand. The `.p8` private
+> key, Team ID, and Key ID stay server-side in Vercel env vars.
+
 ---
 
 ## How It Works
@@ -194,6 +250,12 @@ The app is a static Vite build. **Vercel** is the simplest path to HTTPS for
 5. **Environment variables** (Production):
    - `VITE_SPOTIFY_CLIENT_ID` = your Spotify Client ID
    - Do **not** set `VITE_SPOTIFY_REDIRECT_URI` — production uses the page origin.
+   - (Optional) `VITE_YOUTUBE_API_KEY` — see YouTube setup.
+   - (Optional) `APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` — see Apple
+     Music setup. These are **unprefixed** because they're consumed by the
+     serverless function (`frontend/api/apple-developer-token.ts`), which Vercel
+     deploys automatically alongside the Vite app when the Root Directory is
+     `frontend`.
 6. Deploy. You will get a `*.vercel.app` URL; confirm the app loads there first.
 
 ### 2. Attach oldpod.online in Vercel
@@ -256,6 +318,7 @@ Your Spotify user must still be listed under **User Management** (Development Mo
 - [x] Synced lyrics (LRCLib) on Now Playing
 - [x] Audius as a free, no-login source
 - [x] YouTube as a free, no-login source (Data API + IFrame player)
+- [x] Apple Music (MusicKit JS + serverless developer-token endpoint)
 - [ ] Artist browsing
 - [ ] Cover Flow album view
 - [ ] Genius-style on-the-go playlists
@@ -264,7 +327,7 @@ Your Spotify user must still be listed under **User Management** (Development Mo
 
 ## Legal
 
-OldPod.fm is an independent project and is not affiliated with Apple or Spotify. iPod is a trademark of Apple Inc. This project does not use Apple's trademarks or intellectual property. Spotify playback is handled entirely through the official Spotify Web Playback SDK under Spotify's developer terms.
+OldPod.fm is an independent project and is not affiliated with Apple or Spotify. iPod is a trademark of Apple Inc. Spotify playback is handled entirely through the official Spotify Web Playback SDK under Spotify's developer terms. Apple Music playback is handled entirely through Apple's official **MusicKit JS** under Apple's MusicKit terms, with Apple Music attribution shown in the Now Playing screen; DRM (full-catalog) and preview streams are never co-mingled. The Privacy Policy and Terms are hosted on bicoastalai.com.
 
 ---
 
