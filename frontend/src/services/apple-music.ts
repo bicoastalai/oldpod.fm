@@ -52,6 +52,16 @@ const ARTWORK_SIZE = 300;
 export const APPLE_NOT_CONFIGURED_MESSAGE = "Apple Music isn't set up yet.";
 /** User-facing message when the user has not signed in to Apple Music. */
 export const APPLE_NOT_AUTHORIZED_MESSAGE = 'Sign in to Apple Music to see your library.';
+/**
+ * Friendly message for the source-selection gate when Apple Music can't be
+ * reached/configured (no developer token), so we never strand the user in a
+ * broken Apple Music mode.
+ */
+export const APPLE_UNAVAILABLE_MESSAGE = "Apple Music isn't available right now.";
+/** Friendly message for the gate when the user dismisses/declines the sign-in. */
+export const APPLE_SIGN_IN_CANCELLED_MESSAGE = 'Apple Music sign-in was cancelled.';
+/** Interim message shown while bootstrapping MusicKit + signing the user in. */
+export const APPLE_CONNECTING_MESSAGE = 'Connecting to Apple Music…';
 
 // ── MusicKit bootstrap (shared with the player hook) ───────
 

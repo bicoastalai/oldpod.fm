@@ -15,8 +15,19 @@ import {
   formatTime,
 } from './services/spotify';
 import { createAudiusService } from './services/audius';
-import { createYouTubeService } from './services/youtube';
-import { authorizeAppleMusic, createAppleMusicService } from './services/apple-music';
+import {
+  createYouTubeService,
+  isYouTubeKeyConfigured,
+  YOUTUBE_NO_KEY_MESSAGE,
+} from './services/youtube';
+import {
+  APPLE_CONNECTING_MESSAGE,
+  APPLE_SIGN_IN_CANCELLED_MESSAGE,
+  APPLE_UNAVAILABLE_MESSAGE,
+  authorizeAppleMusic,
+  createAppleMusicService,
+  ensureAppleMusicConfigured,
+} from './services/apple-music';
 import type {
   Album,
   Artist,
@@ -261,6 +272,12 @@ export default function App() {
     return localStorage.getItem('source') === 'applemusic';
   });
   const [dataError, setDataError] = useState<string | null>(null);
+  // Feedback shown on the source-selection screens (entry gate + Sources) while
+  // connecting to / failing to reach a source that needs config or sign-in.
+  // Kept separate from `dataError` so it never leaks into browse/playback screens.
+  const [sourceNotice, setSourceNotice] = useState<string | null>(null);
+  // Guards against firing a second MusicKit authorize() popup while one is open.
+  const appleConnectingRef = useRef(false);
 
   // Service
   const [service, setService] = useState<ActiveMusicService | null>(null);
@@ -986,6 +1003,7 @@ export default function App() {
     setIsPlaying(false);
     setPositionMs(0);
     setDataError(null);
+    setSourceNotice(null);
     setNav([{ screen: 'login', index: 0 }]);
   }, [audio, youtube, apple]);
 
@@ -1086,11 +1104,10 @@ export default function App() {
   // Entry-gate rows, capability-driven (free no-login first → demo → sign-in).
   const entrySources = useMemo(() => buildEntrySources(PROVIDERS), []);
 
-  // Switch source (demo/audius/youtube/applemusic), resetting playback. Apple
-  // Music needs login, but via MusicKit's own popup rather than a redirect, so
-  // it's handled here alongside the login-less sources; we kick off authorize
-  // within this user gesture so the Music User Token is ready before playback.
-  const switchSource = useCallback(
+  // Commit to a source: reset playback, point the active service at it, and drop
+  // into the main menu. Only called once a source is known to be usable (config
+  // present, sign-in succeeded) so the user never lands in a broken mode.
+  const commitSource = useCallback(
     (target: 'demo' | 'audius' | 'youtube' | 'applemusic') => {
       audio.stop();
       youtube.stop();
@@ -1099,6 +1116,7 @@ export default function App() {
       setIsPlaying(false);
       setPositionMs(0);
       setDataError(null);
+      setSourceNotice(null);
       setTracks([]);
       setTrackSource(null);
       setIsDemoMode(target === 'demo');
@@ -1121,12 +1139,63 @@ export default function App() {
         localStorage.setItem('source', 'applemusic');
         localStorage.removeItem('demo_mode');
         setService(createAppleMusicService());
-        // Best-effort sign-in; ignored if Apple isn't configured or cancelled.
-        void authorizeAppleMusic().catch(() => {});
       }
       setNav([{ screen: 'mainMenu', index: 0 }]);
     },
     [audio, youtube, apple]
+  );
+
+  // Apple Music sign-in flow. Bootstraps MusicKit + the developer token, then
+  // runs MusicKit's own authorize() popup *before* entering Apple Music mode.
+  // Surfaces an interim "Connecting…" notice and, on missing config / declined /
+  // failed sign-in, a friendly message that leaves the user on the selection
+  // screen (never a dead-end Apple Music mode). Non-subscribers still enter and
+  // fall back to 30s previews in useAppleMusicPlayer, since authorize succeeds.
+  const connectAppleMusic = useCallback(async () => {
+    if (appleConnectingRef.current) return;
+    appleConnectingRef.current = true;
+    setSourceNotice(APPLE_CONNECTING_MESSAGE);
+    try {
+      const music = await ensureAppleMusicConfigured();
+      if (!music) {
+        // No developer token (Apple secrets unset on the server / dev SPA).
+        setSourceNotice(APPLE_UNAVAILABLE_MESSAGE);
+        return;
+      }
+      let userToken: string | null = null;
+      try {
+        userToken = await authorizeAppleMusic();
+      } catch {
+        userToken = null;
+      }
+      if (!userToken) {
+        // authorize() rejected or was dismissed by the user.
+        setSourceNotice(APPLE_SIGN_IN_CANCELLED_MESSAGE);
+        return;
+      }
+      commitSource('applemusic');
+    } finally {
+      appleConnectingRef.current = false;
+    }
+  }, [commitSource]);
+
+  // Entry point for selecting a non-Spotify source. Sources that can't be used
+  // communicate that at selection time and keep the user on the current screen:
+  // YouTube without an API key shows the needs-setup notice; Apple Music runs its
+  // sign-in flow first. Demo/Audius are always usable, so they commit directly.
+  const switchSource = useCallback(
+    (target: 'demo' | 'audius' | 'youtube' | 'applemusic') => {
+      if (target === 'youtube' && !isYouTubeKeyConfigured()) {
+        setSourceNotice(YOUTUBE_NO_KEY_MESSAGE);
+        return;
+      }
+      if (target === 'applemusic') {
+        void connectAppleMusic();
+        return;
+      }
+      commitSource(target);
+    },
+    [commitSource, connectAppleMusic]
   );
 
   // ── Select action (takes explicit index to avoid stale closure) ──
@@ -1160,6 +1229,7 @@ export default function App() {
           else if (idx === 2) push('nowPlaying');
           else if (idx === 3) {
             setDataError(null);
+            setSourceNotice(null);
             push('sources');
           } else if (idx === 4) push('settings');
           break;
@@ -1168,8 +1238,10 @@ export default function App() {
           const p = PROVIDERS[idx];
           if (!p) break;
           if (p.id === activeProviderId) {
+            setSourceNotice(null);
             setNav([{ screen: 'mainMenu', index: 0 }]);
           } else if (p.status === 'planned') {
+            setSourceNotice(null);
             setDataError(`${p.label} — ${p.blurb}`);
           } else if (p.id === 'demo') {
             switchSource('demo');
@@ -1190,6 +1262,7 @@ export default function App() {
               setCurrentTrack(null);
               setIsPlaying(false);
               setPositionMs(0);
+              setSourceNotice(null);
               setIsDemoMode(false);
               setIsAudiusMode(false);
               setIsYouTubeMode(false);
@@ -1450,6 +1523,7 @@ export default function App() {
                   }
                   searchQuery={searchQuery}
                   dataError={dataError}
+                  sourceNotice={sourceNotice}
                   activeProviderId={activeProviderId}
                   trackSource={trackSource}
                   lyrics={lyrics}
@@ -1504,6 +1578,8 @@ interface ScreenProps {
   playerError: string | null;
   searchQuery: string;
   dataError: string | null;
+  /** Source-selection feedback for the entry gate + Sources screen. */
+  sourceNotice: string | null;
   activeProviderId: ProviderId;
   trackSource: PlaySource | null;
   lyrics: TrackLyrics | null;
@@ -1524,6 +1600,7 @@ function ScreenContent(props: ScreenProps) {
           sources={props.entrySources}
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
+          notice={props.sourceNotice}
         />
       );
     case 'mainMenu':
@@ -1631,7 +1708,7 @@ function ScreenContent(props: ScreenProps) {
           activeProviderId={props.activeProviderId}
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
-          note={props.dataError}
+          note={props.sourceNotice ?? props.dataError}
         />
       );
     case 'search':
@@ -1680,10 +1757,12 @@ function LoginScreen({
   sources,
   selectedIndex,
   onItemClick,
+  notice,
 }: {
   sources: EntrySource[];
   selectedIndex: number;
   onItemClick: (i: number) => void;
+  notice: string | null;
 }) {
   const redirectWarning = getRedirectUriWarning();
 
@@ -1691,7 +1770,11 @@ function LoginScreen({
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div className="login-screen" style={{ flex: 1 }}>
         <div className="login-logo">🎵 OldPod.fm</div>
-        {redirectWarning ? (
+        {/* Latest source-selection feedback (connecting / unavailable / cancelled)
+            takes priority, then the redirect-config warning, else the prompt. */}
+        {notice ? (
+          <p className="login-sub login-sub--warn">{notice}</p>
+        ) : redirectWarning ? (
           <p className="login-sub login-sub--warn">{redirectWarning}</p>
         ) : (
           <p className="login-sub">Choose your music</p>
