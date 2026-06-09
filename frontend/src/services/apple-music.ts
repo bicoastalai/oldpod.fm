@@ -62,14 +62,26 @@ export const APPLE_UNAVAILABLE_MESSAGE = "Apple Music isn't available right now.
 export const APPLE_SIGN_IN_CANCELLED_MESSAGE = 'Apple Music sign-in was cancelled.';
 /** Interim message shown while bootstrapping MusicKit + signing the user in. */
 export const APPLE_CONNECTING_MESSAGE = 'Connecting to Apple Music…';
+/** Gate notice when the developer-token endpoint can't be reached (network). */
+export const APPLE_TOKEN_UNREACHABLE_MESSAGE = "Apple Music: can't reach the token server.";
+/** Gate notice when the MusicKit script fails to load (blocked CDN, timeout). */
+export const APPLE_SCRIPT_FAILED_MESSAGE = "Apple Music: player script didn't load.";
+/** Gate notice when MusicKit.configure throws (e.g. iOS Safari Private Browsing). */
+export const APPLE_SETUP_FAILED_MESSAGE =
+  'Apple Music setup failed — try turning off Private Browsing.';
 
 // ── MusicKit bootstrap (shared with the player hook) ───────
 
 let scriptPromise: Promise<void> | null = null;
 let configurePromise: Promise<MusicKit.MusicKitInstance | null> | null = null;
 // Sticky flag once we learn the server has no Apple secrets, so the UI can show
-// a graceful "not set up" state without re-probing on every interaction.
+// a graceful "not set up" state without re-probing on every interaction. Only
+// set for a definitive "not configured" answer — never for transient network
+// failures, which must stay retryable.
 let knownNotConfigured = false;
+// The user-facing message for the step that broke the last bootstrap attempt,
+// so the gate can say *which* step failed instead of a generic "unavailable".
+let lastBootstrapFailure: string | null = null;
 // 30-second preview URLs keyed by the catalog song id used for playback, so the
 // player hook can fall back to previews for non-subscribers without changing the
 // shared `Track` shape.
@@ -78,6 +90,15 @@ const previewUrls = new Map<string, string>();
 /** True once we've confirmed the developer-token endpoint is not configured. */
 export function isAppleMusicKnownUnconfigured(): boolean {
   return knownNotConfigured;
+}
+
+/**
+ * The user-facing message for whichever step broke the most recent bootstrap
+ * attempt (token fetch / script load / configure), or null when the last
+ * attempt succeeded. Lets the gate surface a specific, actionable notice.
+ */
+export function getAppleMusicBootstrapFailureMessage(): string | null {
+  return lastBootstrapFailure;
 }
 
 /** A previously-mapped 30s preview URL for a catalog song id, if any. */
@@ -91,34 +112,51 @@ export function appleSongIdFromUri(uri: string): string | null {
   return m ? m[1] : null;
 }
 
-async function fetchDeveloperToken(): Promise<string | null> {
+const TOKEN_FETCH_TIMEOUT_MS = 10_000;
+
+type DeveloperTokenResult =
+  | { token: string }
+  // 'unreachable' is transient (offline, flaky cellular, content blocker) and
+  // retryable; 'not-configured' is the server's definitive "no Apple secrets".
+  | { failure: 'unreachable' | 'not-configured' };
+
+async function fetchDeveloperToken(): Promise<DeveloperTokenResult> {
+  // Abort a stalled fetch (e.g. dropped cellular connection) instead of leaving
+  // the gate on "Connecting…" indefinitely.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TOKEN_FETCH_TIMEOUT_MS);
   let res: Response;
   try {
-    res = await fetch(DEVELOPER_TOKEN_ENDPOINT, { headers: { accept: 'application/json' } });
+    res = await fetch(DEVELOPER_TOKEN_ENDPOINT, {
+      headers: { accept: 'application/json' },
+      signal: controller.signal,
+    });
   } catch {
-    // Network/offline — treat as not configured so the app stays usable.
-    knownNotConfigured = true;
-    return null;
+    return { failure: 'unreachable' };
+  } finally {
+    clearTimeout(timer);
   }
   // 503 is our explicit "not configured"; a non-JSON 200 means we hit the SPA
   // fallback (e.g. the Vite dev server with no serverless runtime) — same thing.
   const contentType = res.headers.get('content-type') ?? '';
   if (res.status === 503 || !res.ok || !contentType.includes('application/json')) {
     knownNotConfigured = true;
-    return null;
+    return { failure: 'not-configured' };
   }
   try {
     const json = (await res.json()) as { token?: unknown };
     if (typeof json.token === 'string' && json.token.length > 0) {
       knownNotConfigured = false;
-      return json.token;
+      return { token: json.token };
     }
   } catch {
     /* fall through */
   }
   knownNotConfigured = true;
-  return null;
+  return { failure: 'not-configured' };
 }
+
+const SCRIPT_LOAD_TIMEOUT_MS = 15_000;
 
 function loadMusicKitScript(): Promise<void> {
   if (typeof window === 'undefined' || typeof document === 'undefined') {
@@ -128,48 +166,101 @@ function loadMusicKitScript(): Promise<void> {
   if (scriptPromise) return scriptPromise;
 
   scriptPromise = new Promise<void>((resolve, reject) => {
-    const done = () => resolve();
-    // MusicKit dispatches `musickitloaded` on document once it attaches.
-    document.addEventListener('musickitloaded', done, { once: true });
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poll);
+      document.removeEventListener('musickitloaded', onLoaded);
+      if (error) {
+        // Drop the memoised promise so an explicit user retry re-attempts the
+        // load instead of replaying this failure for the rest of the session.
+        scriptPromise = null;
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    const onLoaded = () => finish();
+    // MusicKit dispatches `musickitloaded` on document once it attaches; poll
+    // as a fallback in case the event fired before we listened (pre-existing
+    // tag) or never dispatches on this browser.
+    const poll = setInterval(() => {
+      if (window.MusicKit) finish();
+    }, 250);
+    const timer = setTimeout(
+      () => finish(new Error('Apple MusicKit script timed out.')),
+      SCRIPT_LOAD_TIMEOUT_MS
+    );
+    document.addEventListener('musickitloaded', onLoaded, { once: true });
     if (!document.querySelector(`script[src="${MUSICKIT_SRC}"]`)) {
       const tag = document.createElement('script');
       tag.src = MUSICKIT_SRC;
       tag.async = true;
-      tag.addEventListener('error', () => reject(new Error('Could not load Apple MusicKit.')));
+      tag.addEventListener('error', () => {
+        // Remove the failed tag so a retry injects a fresh one.
+        tag.remove();
+        finish(new Error('Could not load Apple MusicKit.'));
+      });
       document.head.appendChild(tag);
-    } else if (window.MusicKit) {
-      resolve();
     }
   });
   return scriptPromise;
 }
 
 /**
- * Load + configure MusicKit once, returning the instance (or null when Apple is
- * not configured on the server). Safe to call repeatedly; the work is memoised.
+ * Load + configure MusicKit once, returning the instance (or null when the
+ * bootstrap failed — call `getAppleMusicBootstrapFailureMessage()` for the
+ * step-specific reason). Safe to call repeatedly: success is memoised, while
+ * failures clear the memo so an explicit user retry re-attempts from scratch
+ * (a flaky token fetch or blocked CDN must not latch for the whole session).
  */
 export async function ensureAppleMusicConfigured(): Promise<MusicKit.MusicKitInstance | null> {
   if (configurePromise) return configurePromise;
 
-  configurePromise = (async () => {
-    const token = await fetchDeveloperToken();
-    if (!token) return null;
-    await loadMusicKitScript();
-    if (!window.MusicKit) return null;
-    const instance = await window.MusicKit.configure({
-      developerToken: token,
-      app: { name: 'OldPod.fm', build: '1.0' },
-    });
-    return instance ?? window.MusicKit.getInstance() ?? null;
+  const attempt = (async (): Promise<MusicKit.MusicKitInstance | null> => {
+    lastBootstrapFailure = null;
+    const tokenResult = await fetchDeveloperToken();
+    if ('failure' in tokenResult) {
+      lastBootstrapFailure =
+        tokenResult.failure === 'unreachable'
+          ? APPLE_TOKEN_UNREACHABLE_MESSAGE
+          : APPLE_UNAVAILABLE_MESSAGE;
+      return null;
+    }
+    try {
+      await loadMusicKitScript();
+    } catch {
+      lastBootstrapFailure = APPLE_SCRIPT_FAILED_MESSAGE;
+      return null;
+    }
+    if (!window.MusicKit) {
+      lastBootstrapFailure = APPLE_SCRIPT_FAILED_MESSAGE;
+      return null;
+    }
+    try {
+      const instance = await window.MusicKit.configure({
+        developerToken: tokenResult.token,
+        app: { name: 'OldPod.fm', build: '1.0' },
+      });
+      return instance ?? window.MusicKit.getInstance() ?? null;
+    } catch (err) {
+      // Known to throw on iOS Safari in Private Browsing / with strict privacy
+      // protections. Log the verbatim reason for observability (same pattern
+      // as the Spotify service) — it never contains tokens.
+      console.warn(
+        `[applemusic] MusicKit.configure failed — ${err instanceof Error ? err.message : String(err)}`
+      );
+      lastBootstrapFailure = APPLE_SETUP_FAILED_MESSAGE;
+      return null;
+    }
   })();
 
-  try {
-    return await configurePromise;
-  } catch {
-    // Let a later call retry configuration (e.g. transient script load failure).
-    configurePromise = null;
-    return null;
-  }
+  configurePromise = attempt;
+  const instance = await attempt;
+  if (!instance) configurePromise = null;
+  return instance;
 }
 
 /**
@@ -193,7 +284,7 @@ function storefront(music: MusicKit.MusicKitInstance): string {
 
 async function getConfiguredOrThrow(): Promise<MusicKit.MusicKitInstance> {
   const music = await ensureAppleMusicConfigured();
-  if (!music) throw new Error(APPLE_NOT_CONFIGURED_MESSAGE);
+  if (!music) throw new Error(lastBootstrapFailure ?? APPLE_NOT_CONFIGURED_MESSAGE);
   return music;
 }
 

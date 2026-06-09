@@ -27,6 +27,7 @@ import {
   authorizeAppleMusic,
   createAppleMusicService,
   ensureAppleMusicConfigured,
+  getAppleMusicBootstrapFailureMessage,
 } from './services/apple-music';
 import type {
   Album,
@@ -1158,8 +1159,10 @@ export default function App() {
     try {
       const music = await ensureAppleMusicConfigured();
       if (!music) {
-        // No developer token (Apple secrets unset on the server / dev SPA).
-        setSourceNotice(APPLE_UNAVAILABLE_MESSAGE);
+        // Surface which bootstrap step failed (token fetch / script load /
+        // configure) so the notice is actionable; failures are not memoised,
+        // so re-selecting Apple Music retries from scratch.
+        setSourceNotice(getAppleMusicBootstrapFailureMessage() ?? APPLE_UNAVAILABLE_MESSAGE);
         return;
       }
       let userToken: string | null = null;
