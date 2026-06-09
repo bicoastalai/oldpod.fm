@@ -5,6 +5,7 @@ import SearchScreen, { SEARCH_KEYS } from './components/SearchScreen';
 import { useSpotifyPlayer } from './hooks/useSpotifyPlayer';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
 import { useYouTubePlayer } from './hooks/useYouTubePlayer';
+import { useAppleMusicPlayer } from './hooks/useAppleMusicPlayer';
 import {
   albumArtPlaceholder,
   createMockService,
@@ -14,6 +15,7 @@ import {
 } from './services/spotify';
 import { createAudiusService } from './services/audius';
 import { createYouTubeService } from './services/youtube';
+import { authorizeAppleMusic, createAppleMusicService } from './services/apple-music';
 import type {
   Album,
   Artist,
@@ -78,9 +80,26 @@ interface ArtistMenuEntry {
   label: string;
   kind: ArtistMenuKind;
 }
-const SETTINGS_MENU = ['Shuffle', 'Repeat', 'Theme', 'About', 'Sign Out'];
+const SETTINGS_MENU = ['Shuffle', 'Repeat', 'Theme', 'About', 'Privacy & Terms', 'Sign Out'];
 
 const REPEAT_ORDER: RepeatMode[] = ['off', 'context', 'track'];
+
+// Privacy Policy & Terms are hosted by the owner on bicoastalai.com; the exact
+// paths can be adjusted there later without code changes here.
+const LEGAL_PRIVACY_URL = 'https://bicoastalai.com/privacy';
+const LEGAL_TERMS_URL = 'https://bicoastalai.com/terms';
+
+// Sources whose playback is a single-track engine (HTML5 <audio> / YouTube
+// IFrame / MusicKit) rather than Spotify's context-based SDK or the demo timer.
+// App routes these through one shared `TrackPlayer` adapter (see `activePlayer`).
+interface TrackPlayer {
+  loadAndPlay: (track: Track) => Promise<void> | void;
+  pause: () => void;
+  resume: () => Promise<void> | void;
+  seek: (positionMs: number) => void;
+  setVolume: (volumePct: number) => void;
+  stop: () => void;
+}
 
 type ActiveMusicService = MusicProvider & MusicPlayerController;
 
@@ -123,6 +142,12 @@ function pickNextIndex(curr: number, len: number, shuffle: boolean): number {
 
 function repeatLabel(mode: RepeatMode): string {
   return mode === 'off' ? 'Off' : mode === 'context' ? 'All' : 'One';
+}
+
+// Short hint on the Sign Out row naming what leaving the current source does.
+function signOutDetail(providerId: ProviderId): string {
+  if (providerId === 'demo') return 'Exit demo';
+  return getProviderMeta(providerId)?.label ?? 'Spotify';
 }
 
 // A row on the "Choose your music" entry gate, derived from a provider's
@@ -219,6 +244,12 @@ export default function App() {
     if (getStoredToken() || localStorage.getItem('spot_refresh')) return false;
     return localStorage.getItem('source') === 'youtube';
   });
+  // Apple Music is a premium, logged-in source; MusicKit persists the user's
+  // own authorization, so we just remember the selected source like the others.
+  const [isAppleMusicMode, setIsAppleMusicMode] = useState(() => {
+    if (getStoredToken() || localStorage.getItem('spot_refresh')) return false;
+    return localStorage.getItem('source') === 'applemusic';
+  });
   const [dataError, setDataError] = useState<string | null>(null);
 
   // Service
@@ -227,9 +258,18 @@ export default function App() {
   // Which source is currently active (drives the Sources screen highlight).
   const activeProviderId: ProviderId =
     service?.meta.id ??
-    (isDemoMode ? 'demo' : isAudiusMode ? 'audius' : isYouTubeMode ? 'youtube' : 'spotify');
+    (isDemoMode
+      ? 'demo'
+      : isAudiusMode
+        ? 'audius'
+        : isYouTubeMode
+          ? 'youtube'
+          : isAppleMusicMode
+            ? 'applemusic'
+            : 'spotify');
   const isAudius = activeProviderId === 'audius';
   const isYouTube = activeProviderId === 'youtube';
+  const isAppleMusic = activeProviderId === 'applemusic';
   const isSpotify = activeProviderId === 'spotify';
 
   // Data
@@ -293,17 +333,73 @@ export default function App() {
     volumeControllable,
   } = useSpotifyPlayer(accessToken);
 
-  // HTML5 <audio> player (Audius and other DRM-free sources). The end-of-track
-  // handler advances the queue and is wired via a ref so the hook keeps a
-  // stable callback while still seeing fresh shuffle/repeat/index state.
-  const audiusEndedRef = useRef<() => void>(() => {});
-  const audio = useAudioPlayer(useCallback(() => audiusEndedRef.current(), []));
-
-  // YouTube IFrame player (routed by provider id, same pattern as Audius). The
-  // end-of-track handler advances the queue via a ref so the hook keeps a stable
+  // The single-track engines (Audius <audio>, YouTube IFrame, Apple MusicKit)
+  // all share one end-of-track handler: it advances the queue using the active
+  // engine's own `loadAndPlay`. Kept in a ref so each hook keeps a stable
   // callback while still seeing fresh shuffle/repeat/index state.
-  const youtubeEndedRef = useRef<() => void>(() => {});
-  const youtube = useYouTubePlayer(useCallback(() => youtubeEndedRef.current(), []));
+  const singleTrackEndedRef = useRef<() => void>(() => {});
+  const onSingleTrackEnded = useCallback(() => singleTrackEndedRef.current(), []);
+
+  // HTML5 <audio> player (Audius and other DRM-free sources).
+  const audio = useAudioPlayer(onSingleTrackEnded);
+  // YouTube IFrame player (routed by provider id, same pattern as Audius).
+  const youtube = useYouTubePlayer(onSingleTrackEnded);
+  // Apple Music player (MusicKit, with a 30s-preview fallback for non-
+  // subscribers). Same single-track contract as Audius/YouTube.
+  const apple = useAppleMusicPlayer(onSingleTrackEnded);
+
+  // The active single-track engine (or null for Spotify/demo), exposed through a
+  // uniform adapter so the playback handlers don't branch per-source. Each
+  // engine's controls are stable callbacks, so this only changes when the
+  // active source changes.
+  const activePlayer = useMemo<TrackPlayer | null>(() => {
+    if (isAudius) {
+      return {
+        loadAndPlay: (track) => audio.loadAndPlay(track.uri),
+        pause: audio.pause,
+        resume: audio.resume,
+        seek: audio.seek,
+        setVolume: audio.setVolume,
+        stop: audio.stop,
+      };
+    }
+    if (isYouTube) {
+      return {
+        loadAndPlay: (track) => youtube.loadAndPlay(track.id),
+        pause: youtube.pause,
+        resume: youtube.resume,
+        seek: youtube.seek,
+        setVolume: youtube.setVolume,
+        stop: youtube.stop,
+      };
+    }
+    if (isAppleMusic) {
+      return {
+        loadAndPlay: (track) => apple.loadAndPlay(track),
+        pause: apple.pause,
+        resume: apple.resume,
+        seek: apple.seek,
+        setVolume: apple.setVolume,
+        stop: apple.stop,
+      };
+    }
+    return null;
+  }, [
+    isAudius, isYouTube, isAppleMusic,
+    audio.loadAndPlay, audio.pause, audio.resume, audio.seek, audio.setVolume, audio.stop,
+    youtube.loadAndPlay, youtube.pause, youtube.resume, youtube.seek, youtube.setVolume, youtube.stop,
+    apple.loadAndPlay, apple.pause, apple.resume, apple.seek, apple.setVolume, apple.stop,
+  ]);
+
+  // Position/playing state of the active single-track engine, for syncing into
+  // the shared UI playback state below.
+  const activePlayerState = isAudius
+    ? audio.audioState
+    : isYouTube
+      ? youtube.playerState
+      : isAppleMusic
+        ? apple.playerState
+        : null;
 
   const resolveSpotifyToken = useCallback(async (): Promise<string | null> => {
     let token = getStoredToken();
@@ -333,15 +429,10 @@ export default function App() {
     };
   }, [isSpotify, volumeControllable, currentScreen, getDeviceVolume]);
 
-  // Keep the Audius <audio> element's volume in sync with the volume bar.
+  // Keep the active single-track engine's volume in sync with the volume bar.
   useEffect(() => {
-    if (isAudius) audio.setVolume(volume);
-  }, [isAudius, volume, audio]);
-
-  // Keep the YouTube IFrame player's volume in sync with the volume bar.
-  useEffect(() => {
-    if (isYouTube) youtube.setVolume(volume);
-  }, [isYouTube, volume, youtube]);
+    if (activePlayer) activePlayer.setVolume(volume);
+  }, [activePlayer, volume]);
 
   // ── Init service + session bootstrap ─────────────────────
 
@@ -358,11 +449,15 @@ export default function App() {
       setService(createYouTubeService());
       return;
     }
+    if (isAppleMusicMode) {
+      setService(createAppleMusicService());
+      return;
+    }
     setService(createSpotifyService(resolveSpotifyToken));
-  }, [isDemoMode, isAudiusMode, isYouTubeMode, resolveSpotifyToken]);
+  }, [isDemoMode, isAudiusMode, isYouTubeMode, isAppleMusicMode, resolveSpotifyToken]);
 
   useEffect(() => {
-    if (isDemoMode || isAudiusMode || isYouTubeMode) {
+    if (isDemoMode || isAudiusMode || isYouTubeMode || isAppleMusicMode) {
       if (nav[0]?.screen === 'login') setNav([{ screen: 'mainMenu', index: 0 }]);
       return;
     }
@@ -371,7 +466,7 @@ export default function App() {
         setNav([{ screen: 'mainMenu', index: 0 }]);
       }
     });
-  }, [isDemoMode, isAudiusMode, isYouTubeMode, resolveSpotifyToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isDemoMode, isAudiusMode, isYouTubeMode, isAppleMusicMode, resolveSpotifyToken]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Handle PKCE callback (?code=...) ────────────────────
 
@@ -405,21 +500,13 @@ export default function App() {
     if (sdkState.track) setCurrentTrack(sdkState.track);
   }, [sdkState, isSpotify]);
 
-  // ── Audius (<audio>) state sync ──────────────────────────
+  // ── Single-track engine (Audius / YouTube / Apple Music) state sync ──
 
   useEffect(() => {
-    if (!isAudius) return;
-    setIsPlaying(audio.audioState.isPlaying);
-    if (Date.now() >= scrubbingUntilRef.current) setPositionMs(audio.audioState.positionMs);
-  }, [isAudius, audio.audioState]);
-
-  // ── YouTube (IFrame) state sync ──────────────────────────
-
-  useEffect(() => {
-    if (!isYouTube) return;
-    setIsPlaying(youtube.playerState.isPlaying);
-    if (Date.now() >= scrubbingUntilRef.current) setPositionMs(youtube.playerState.positionMs);
-  }, [isYouTube, youtube.playerState]);
+    if (!activePlayerState) return;
+    setIsPlaying(activePlayerState.isPlaying);
+    if (Date.now() >= scrubbingUntilRef.current) setPositionMs(activePlayerState.positionMs);
+  }, [activePlayerState]);
 
   // ── Demo mode position timer ─────────────────────────────
 
@@ -642,22 +729,6 @@ export default function App() {
 
   // ── Playback controls ─────────────────────────────────────
 
-  // Audius plays its stream URL (Track.uri) through the HTML5 audio element.
-  const playAudiusTrack = useCallback(
-    async (track: Track) => {
-      await audio.loadAndPlay(track.uri);
-    },
-    [audio]
-  );
-
-  // YouTube plays the videoId (Track.id) through the IFrame player.
-  const playYouTubeTrack = useCallback(
-    async (track: Track) => {
-      await youtube.loadAndPlay(track.id);
-    },
-    [youtube]
-  );
-
   const playFromList = useCallback(
     async (trackList: Track[], idx: number, source: PlaySource) => {
       const track = trackList[idx];
@@ -667,12 +738,9 @@ export default function App() {
       setCurrentTrackIndex(idx);
       setPositionMs(0);
       setIsPlaying(true);
-      if (isAudius) {
-        await playAudiusTrack(track);
-        return;
-      }
-      if (isYouTube) {
-        await playYouTubeTrack(track);
+      // Single-track engines (Audius / YouTube / Apple Music) load one track.
+      if (activePlayer) {
+        await activePlayer.loadAndPlay(track);
         return;
       }
       // Demo mode is driven by the simulated position timer; Spotify by the SDK.
@@ -685,7 +753,7 @@ export default function App() {
         }
       }
     },
-    [isAudius, playAudiusTrack, isYouTube, playYouTubeTrack, isDemoMode, service, activatePlayback, runWithDevice]
+    [activePlayer, isDemoMode, service, activatePlayback, runWithDevice]
   );
 
   // Start a context (playlist/album) without a known track list — relies on the
@@ -708,14 +776,9 @@ export default function App() {
   const togglePlay = useCallback(async () => {
     const next = !isPlaying;
     setIsPlaying(next);
-    if (isAudius) {
-      if (next) await audio.resume();
-      else audio.pause();
-      return;
-    }
-    if (isYouTube) {
-      if (next) youtube.resume();
-      else youtube.pause();
+    if (activePlayer) {
+      if (next) await activePlayer.resume();
+      else activePlayer.pause();
       return;
     }
     if (!isDemoMode && service) {
@@ -726,7 +789,7 @@ export default function App() {
         setIsPlaying(!next);
       }
     }
-  }, [isPlaying, isAudius, audio, isYouTube, youtube, isDemoMode, service, activatePlayback, runWithDevice]);
+  }, [isPlaying, activePlayer, isDemoMode, service, activatePlayback, runWithDevice]);
 
   const skipNext = useCallback(async () => {
     const list = playingTracksRef.current;
@@ -737,12 +800,8 @@ export default function App() {
       setCurrentTrackIndex(nextIdx);
       setPositionMs(0);
     }
-    if (isAudius) {
-      if (nextTrack) await playAudiusTrack(nextTrack);
-      return;
-    }
-    if (isYouTube) {
-      if (nextTrack) await playYouTubeTrack(nextTrack);
+    if (activePlayer) {
+      if (nextTrack) await activePlayer.loadAndPlay(nextTrack);
       return;
     }
     if (!isDemoMode && service) {
@@ -753,18 +812,14 @@ export default function App() {
         /* keep UI state */
       }
     }
-  }, [currentTrackIndex, shuffle, isAudius, playAudiusTrack, isYouTube, playYouTubeTrack, isDemoMode, service, activatePlayback, runWithDevice]);
+  }, [currentTrackIndex, shuffle, activePlayer, isDemoMode, service, activatePlayback, runWithDevice]);
 
   const skipPrev = useCallback(async () => {
     const list = playingTracksRef.current;
     if (positionMs > 3000 || currentTrackIndex === 0) {
       setPositionMs(0);
-      if (isAudius) {
-        audio.seek(0);
-        return;
-      }
-      if (isYouTube) {
-        youtube.seek(0);
+      if (activePlayer) {
+        activePlayer.seek(0);
         return;
       }
       if (!isDemoMode && service) {
@@ -781,12 +836,8 @@ export default function App() {
       setCurrentTrack(prevTrack);
       setCurrentTrackIndex(prevIdx);
       setPositionMs(0);
-      if (isAudius) {
-        if (prevTrack) await playAudiusTrack(prevTrack);
-        return;
-      }
-      if (isYouTube) {
-        if (prevTrack) await playYouTubeTrack(prevTrack);
+      if (activePlayer) {
+        if (prevTrack) await activePlayer.loadAndPlay(prevTrack);
         return;
       }
       if (!isDemoMode && service) {
@@ -798,17 +849,18 @@ export default function App() {
         }
       }
     }
-  }, [currentTrackIndex, positionMs, isAudius, audio, playAudiusTrack, isYouTube, youtube, playYouTubeTrack, isDemoMode, service, activatePlayback, runWithDevice]);
+  }, [currentTrackIndex, positionMs, activePlayer, isDemoMode, service, activatePlayback, runWithDevice]);
 
-  // When an Audius track ends, advance the queue using the same repeat/shuffle
-  // rules as demo mode. Kept in a ref so the audio hook's `ended` listener
-  // always runs the latest logic without re-subscribing.
+  // When a single-track engine's track ends, advance the queue with the same
+  // repeat/shuffle rules as demo mode, using the active engine's loadAndPlay.
+  // Kept in a ref so each hook's `ended` listener always runs the latest logic.
   useEffect(() => {
-    audiusEndedRef.current = () => {
+    singleTrackEndedRef.current = () => {
+      if (!activePlayer) return;
       const list = playingTracksRef.current;
       if (repeat === 'track') {
         const t = list[currentTrackIndex] ?? currentTrack;
-        if (t) void playAudiusTrack(t);
+        if (t) void activePlayer.loadAndPlay(t);
         return;
       }
       const nextIdx = pickNextIndex(currentTrackIndex, list.length, shuffle);
@@ -817,7 +869,7 @@ export default function App() {
         setCurrentTrack(next);
         setCurrentTrackIndex(nextIdx);
         setPositionMs(0);
-        void playAudiusTrack(next);
+        void activePlayer.loadAndPlay(next);
         return;
       }
       if (repeat === 'context' && list.length > 0) {
@@ -825,54 +877,19 @@ export default function App() {
         setCurrentTrack(first);
         setCurrentTrackIndex(0);
         setPositionMs(0);
-        void playAudiusTrack(first);
+        void activePlayer.loadAndPlay(first);
         return;
       }
       setIsPlaying(false);
     };
-  }, [repeat, shuffle, currentTrackIndex, currentTrack, playAudiusTrack]);
-
-  // When a YouTube video ends, advance the queue with the same repeat/shuffle
-  // rules. Kept in a ref so the IFrame hook's listener always runs latest logic.
-  useEffect(() => {
-    youtubeEndedRef.current = () => {
-      const list = playingTracksRef.current;
-      if (repeat === 'track') {
-        const t = list[currentTrackIndex] ?? currentTrack;
-        if (t) void playYouTubeTrack(t);
-        return;
-      }
-      const nextIdx = pickNextIndex(currentTrackIndex, list.length, shuffle);
-      if (nextIdx < list.length) {
-        const next = list[nextIdx];
-        setCurrentTrack(next);
-        setCurrentTrackIndex(nextIdx);
-        setPositionMs(0);
-        void playYouTubeTrack(next);
-        return;
-      }
-      if (repeat === 'context' && list.length > 0) {
-        const first = list[0];
-        setCurrentTrack(first);
-        setCurrentTrackIndex(0);
-        setPositionMs(0);
-        void playYouTubeTrack(first);
-        return;
-      }
-      setIsPlaying(false);
-    };
-  }, [repeat, shuffle, currentTrackIndex, currentTrack, playYouTubeTrack]);
+  }, [repeat, shuffle, currentTrackIndex, currentTrack, activePlayer]);
 
   const adjustVolume = useCallback(
     (delta: number) => {
       const newVol = Math.max(0, Math.min(100, volume + delta));
       setVolume(newVol);
-      if (isAudius) {
-        audio.setVolume(newVol);
-        return;
-      }
-      if (isYouTube) {
-        youtube.setVolume(newVol);
+      if (activePlayer) {
+        activePlayer.setVolume(newVol);
         return;
       }
       if (!isDemoMode && service && deviceId) {
@@ -880,7 +897,7 @@ export default function App() {
         setPlayerVolume(newVol);
       }
     },
-    [volume, isAudius, audio, isYouTube, youtube, isDemoMode, service, deviceId, setPlayerVolume]
+    [volume, activePlayer, isDemoMode, service, deviceId, setPlayerVolume]
   );
 
   // Scrub the current track. Each wheel tick nudges the position; the real
@@ -894,12 +911,8 @@ export default function App() {
       positionRef.current = target;
       setPositionMs(target);
       scrubbingUntilRef.current = Date.now() + 900;
-      if (isAudius) {
-        audio.seek(target);
-        return;
-      }
-      if (isYouTube) {
-        youtube.seek(target);
+      if (activePlayer) {
+        activePlayer.seek(target);
         return;
       }
       if (isDemoMode || !service) return;
@@ -915,7 +928,7 @@ export default function App() {
         })();
       }, 250);
     },
-    [currentTrack, isAudius, audio, isYouTube, youtube, isDemoMode, service, activatePlayback, runWithDevice]
+    [currentTrack, activePlayer, isDemoMode, service, activatePlayback, runWithDevice]
   );
 
   // ── Settings toggles ─────────────────────────────────────
@@ -942,10 +955,12 @@ export default function App() {
     localStorage.removeItem('source');
     audio.stop();
     youtube.stop();
+    apple.stop();
     setAccessToken(null);
     setIsDemoMode(false);
     setIsAudiusMode(false);
     setIsYouTubeMode(false);
+    setIsAppleMusicMode(false);
     setService(null);
     setPlaylists([]);
     setAlbums([]);
@@ -958,7 +973,7 @@ export default function App() {
     setPositionMs(0);
     setDataError(null);
     setNav([{ screen: 'login', index: 0 }]);
-  }, [audio, youtube]);
+  }, [audio, youtube, apple]);
 
   // ── Lyrics ────────────────────────────────────────────────
 
@@ -1057,42 +1072,47 @@ export default function App() {
   // Entry-gate rows, capability-driven (free no-login first → demo → sign-in).
   const entrySources = useMemo(() => buildEntrySources(PROVIDERS), []);
 
-  // Switch to a login-less source (demo/audius/youtube), resetting playback.
+  // Switch source (demo/audius/youtube/applemusic), resetting playback. Apple
+  // Music needs login, but via MusicKit's own popup rather than a redirect, so
+  // it's handled here alongside the login-less sources; we kick off authorize
+  // within this user gesture so the Music User Token is ready before playback.
   const switchSource = useCallback(
-    (target: 'demo' | 'audius' | 'youtube') => {
+    (target: 'demo' | 'audius' | 'youtube' | 'applemusic') => {
       audio.stop();
       youtube.stop();
+      apple.stop();
       setCurrentTrack(null);
       setIsPlaying(false);
       setPositionMs(0);
       setDataError(null);
       setTracks([]);
       setTrackSource(null);
+      setIsDemoMode(target === 'demo');
+      setIsAudiusMode(target === 'audius');
+      setIsYouTubeMode(target === 'youtube');
+      setIsAppleMusicMode(target === 'applemusic');
       if (target === 'demo') {
         localStorage.setItem('demo_mode', '1');
         localStorage.removeItem('source');
-        setIsAudiusMode(false);
-        setIsYouTubeMode(false);
-        setIsDemoMode(true);
         setService(createMockService());
       } else if (target === 'audius') {
         localStorage.setItem('source', 'audius');
         localStorage.removeItem('demo_mode');
-        setIsDemoMode(false);
-        setIsYouTubeMode(false);
-        setIsAudiusMode(true);
         setService(createAudiusService());
-      } else {
+      } else if (target === 'youtube') {
         localStorage.setItem('source', 'youtube');
         localStorage.removeItem('demo_mode');
-        setIsDemoMode(false);
-        setIsAudiusMode(false);
-        setIsYouTubeMode(true);
         setService(createYouTubeService());
+      } else {
+        localStorage.setItem('source', 'applemusic');
+        localStorage.removeItem('demo_mode');
+        setService(createAppleMusicService());
+        // Best-effort sign-in; ignored if Apple isn't configured or cancelled.
+        void authorizeAppleMusic().catch(() => {});
       }
       setNav([{ screen: 'mainMenu', index: 0 }]);
     },
-    [audio, youtube]
+    [audio, youtube, apple]
   );
 
   // ── Select action (takes explicit index to avoid stale closure) ──
@@ -1107,12 +1127,15 @@ export default function App() {
             switchSource('audius');
           } else if (src.id === 'youtube') {
             switchSource('youtube');
+          } else if (src.id === 'applemusic') {
+            switchSource('applemusic');
           } else if (src.id === 'demo') {
             switchSource('demo');
           } else if (src.id === 'spotify') {
             setIsDemoMode(false);
             setIsAudiusMode(false);
             setIsYouTubeMode(false);
+            setIsAppleMusicMode(false);
             redirectToSpotifyLogin();
           }
           break;
@@ -1140,6 +1163,8 @@ export default function App() {
             switchSource('audius');
           } else if (p.id === 'youtube') {
             switchSource('youtube');
+          } else if (p.id === 'applemusic') {
+            switchSource('applemusic');
           } else if (p.id === 'spotify') {
             if (accessToken) {
               // Already authenticated — switch the active service back to Spotify.
@@ -1147,18 +1172,21 @@ export default function App() {
               localStorage.removeItem('source');
               audio.stop();
               youtube.stop();
+              apple.stop();
               setCurrentTrack(null);
               setIsPlaying(false);
               setPositionMs(0);
               setIsDemoMode(false);
               setIsAudiusMode(false);
               setIsYouTubeMode(false);
+              setIsAppleMusicMode(false);
               setService(createSpotifyService(resolveSpotifyToken));
               setNav([{ screen: 'mainMenu', index: 0 }]);
             } else {
               setIsDemoMode(false);
               setIsAudiusMode(false);
               setIsYouTubeMode(false);
+              setIsAppleMusicMode(false);
               redirectToSpotifyLogin();
             }
           }
@@ -1239,7 +1267,8 @@ export default function App() {
           if (idx === 0) toggleShuffle();
           else if (idx === 1) cycleRepeat();
           else if (idx === 2) toggleTheme();
-          else if (idx === 4) signOut();
+          else if (idx === 4) window.open(LEGAL_PRIVACY_URL, '_blank', 'noopener,noreferrer');
+          else if (idx === 5) signOut();
           break;
         }
         case 'search': {
@@ -1257,7 +1286,7 @@ export default function App() {
       loadPlaylistTracks, loadAlbumTracks,
       loadRecentlyPlayed, loadTrending, playFromList, playContext, openLyrics, toggleShuffle,
       cycleRepeat, toggleTheme, signOut, handleSearchKey, accessToken,
-      activeProviderId, musicMenuItems, artistMenuItems, switchSource, audio, youtube, resolveSpotifyToken,
+      activeProviderId, musicMenuItems, artistMenuItems, switchSource, audio, youtube, apple, resolveSpotifyToken,
       entrySources,
     ]
   );
@@ -1379,14 +1408,22 @@ export default function App() {
                       ? audio.volumeControllable
                       : isYouTube
                         ? youtube.volumeControllable
-                        : volumeControllable
+                        : isAppleMusic
+                          ? apple.volumeControllable
+                          : volumeControllable
                   }
                   shuffle={shuffle}
                   repeat={repeat}
                   theme={theme}
-                  isPlayerReady={isAudius || isYouTube ? true : isReady}
+                  isPlayerReady={isAudius || isYouTube || isAppleMusic ? true : isReady}
                   playerError={
-                    isAudius ? audio.audioError : isYouTube ? youtube.playerError : playerError
+                    isAudius
+                      ? audio.audioError
+                      : isYouTube
+                        ? youtube.playerError
+                        : isAppleMusic
+                          ? apple.playerError
+                          : playerError
                   }
                   searchQuery={searchQuery}
                   dataError={dataError}
@@ -1554,7 +1591,8 @@ function ScreenContent(props: ScreenProps) {
             { label: 'Repeat', detail: repeatLabel(props.repeat) },
             { label: 'Theme', detail: props.theme === 'black' ? 'Classic' : 'White' },
             { label: 'About', detail: 'v1.0' },
-            { label: 'Sign Out', detail: props.activeProviderId === 'demo' ? 'Exit demo' : 'Spotify' },
+            { label: 'Privacy & Terms', detail: 'bicoastalai.com', arrow: true },
+            { label: 'Sign Out', detail: signOutDetail(props.activeProviderId) },
           ]}
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
@@ -1591,6 +1629,7 @@ function ScreenContent(props: ScreenProps) {
           repeat={props.repeat}
           isPlayerReady={props.isPlayerReady}
           playerError={props.playerError}
+          providerId={props.activeProviderId}
         />
       );
     case 'lyrics':
@@ -1657,7 +1696,26 @@ function LoginScreen({
           borderTop: '1px solid rgba(0,0,0,0.08)',
         }}
       >
-        More sources in Main Menu › Sources
+        <div>More sources in Main Menu › Sources</div>
+        <div style={{ marginTop: '2px' }}>
+          <a
+            href={LEGAL_PRIVACY_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: '#888', textDecoration: 'underline' }}
+          >
+            Privacy
+          </a>
+          {' · '}
+          <a
+            href={LEGAL_TERMS_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: '#888', textDecoration: 'underline' }}
+          >
+            Terms
+          </a>
+        </div>
       </div>
     </div>
   );
@@ -1815,6 +1873,7 @@ function NowPlayingScreen({
   repeat,
   isPlayerReady,
   playerError,
+  providerId,
 }: {
   track: Track | null;
   isPlaying: boolean;
@@ -1825,6 +1884,7 @@ function NowPlayingScreen({
   repeat: RepeatMode;
   isPlayerReady: boolean;
   playerError: string | null;
+  providerId: ProviderId;
 }) {
   if (!track) {
     return (
@@ -1910,6 +1970,16 @@ function NowPlayingScreen({
       ) : (
         <div className="np-hint">
           {!isPlayerReady ? 'Play a song to connect audio' : 'Wheel · Seek   Center · Lyrics'}
+        </div>
+      )}
+
+      {/* Apple MusicKit attribution (per Apple's branding guidelines). */}
+      {providerId === 'applemusic' && (
+        <div
+          className="np-hint"
+          style={{ marginTop: '2px', opacity: 0.7, letterSpacing: '0.02em' }}
+        >
+          ♫ Apple Music
         </div>
       )}
     </div>
