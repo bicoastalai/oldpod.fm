@@ -7,8 +7,11 @@
  * and returns only the signed JWT. The browser then calls `MusicKit.configure`
  * with it and obtains a separate Music User Token via `authorize()`.
  *
- * Runs on Vercel's Node runtime using the Web `Request`/`Response` signature so
- * it needs no extra type dependencies (only `jose` for ES256 signing).
+ * Runs on Vercel's Node runtime using the classic `(req, res)` signature
+ * (typed inline so it needs no extra type dependencies; only `jose` is used,
+ * for ES256 signing). The Web `Request`/`Response` default-export style is not
+ * honored by this runtime — it invokes the export as a Node request listener,
+ * ignores the returned `Response`, and the request hangs forever.
  *
  * Required environment variables (set in Vercel → Settings → Environment
  * Variables; never commit them):
@@ -65,15 +68,23 @@ function normalizePrivateKey(raw: string): string {
   return value;
 }
 
-function jsonResponse(body: unknown, status: number, cacheSeconds = 0): Response {
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
+/** Minimal shape of Node's ServerResponse, so we don't need @types/node. */
+interface NodeResponse {
+  statusCode: number;
+  setHeader(name: string, value: string): void;
+  end(chunk: string): void;
+}
+
+function sendJson(res: NodeResponse, body: unknown, status: number, cacheSeconds = 0): void {
+  res.statusCode = status;
+  res.setHeader('content-type', 'application/json');
   if (cacheSeconds > 0) {
     // Let the CDN serve the token for most of its life without re-invoking us.
-    headers['cache-control'] = `public, max-age=0, s-maxage=${cacheSeconds}`;
+    res.setHeader('cache-control', `public, max-age=0, s-maxage=${cacheSeconds}`);
   } else {
-    headers['cache-control'] = 'no-store';
+    res.setHeader('cache-control', 'no-store');
   }
-  return new Response(JSON.stringify(body), { status, headers });
+  res.end(JSON.stringify(body));
 }
 
 async function mintToken(
@@ -92,27 +103,29 @@ async function mintToken(
   return { token, serveUntil: nowSeconds + TOKEN_TTL_SECONDS - REFRESH_SKEW_SECONDS };
 }
 
-export default async function handler(_request: Request): Promise<Response> {
+export default async function handler(_req: unknown, res: NodeResponse): Promise<void> {
   const teamId = process.env.APPLE_TEAM_ID?.trim();
   const keyId = process.env.APPLE_KEY_ID?.trim();
   const rawKey = process.env.APPLE_PRIVATE_KEY;
 
   if (!teamId || !keyId || !rawKey) {
-    return jsonResponse({ error: 'Apple Music not configured' }, 503);
+    sendJson(res, { error: 'Apple Music not configured' }, 503);
+    return;
   }
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   if (cached && cached.serveUntil > nowSeconds) {
     const ttl = cached.serveUntil - nowSeconds;
-    return jsonResponse({ token: cached.token }, 200, ttl);
+    sendJson(res, { token: cached.token }, 200, ttl);
+    return;
   }
 
   try {
     cached = await mintToken(teamId, keyId, normalizePrivateKey(rawKey));
     const ttl = Math.max(0, cached.serveUntil - nowSeconds);
-    return jsonResponse({ token: cached.token }, 200, ttl);
+    sendJson(res, { token: cached.token }, 200, ttl);
   } catch {
     // Don't leak signing internals to the client.
-    return jsonResponse({ error: 'Could not generate Apple Music token' }, 500);
+    sendJson(res, { error: 'Could not generate Apple Music token' }, 500);
   }
 }
