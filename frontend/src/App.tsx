@@ -6,6 +6,7 @@ import { useSpotifyPlayer } from './hooks/useSpotifyPlayer';
 import { useAudioPlayer } from './hooks/useAudioPlayer';
 import { useYouTubePlayer } from './hooks/useYouTubePlayer';
 import { useAppleMusicPlayer } from './hooks/useAppleMusicPlayer';
+import { useClickFeedback } from './hooks/useClickFeedback';
 import {
   albumArtPlaceholder,
   createMockService,
@@ -80,7 +81,16 @@ interface ArtistMenuEntry {
   label: string;
   kind: ArtistMenuKind;
 }
-const SETTINGS_MENU = ['Shuffle', 'Repeat', 'Theme', 'About', 'Privacy & Terms', 'Sign Out'];
+const SETTINGS_MENU = [
+  'Shuffle',
+  'Repeat',
+  'Theme',
+  'Click Sound',
+  'Haptics',
+  'About',
+  'Privacy & Terms',
+  'Sign Out',
+];
 
 const REPEAT_ORDER: RepeatMode[] = ['off', 'context', 'track'];
 
@@ -290,6 +300,10 @@ export default function App() {
     const stored = localStorage.getItem('theme');
     return stored === 'light' ? 'light' : 'black';
   });
+
+  // Tactile navigation feedback (synthesized click sound + haptics), with
+  // Settings toggles persisted to localStorage. Independent of media playback.
+  const feedback = useClickFeedback();
 
   // Lyrics (LRCLib)
   const [lyrics, setLyrics] = useState<TrackLyrics | null>(null);
@@ -1267,8 +1281,10 @@ export default function App() {
           if (idx === 0) toggleShuffle();
           else if (idx === 1) cycleRepeat();
           else if (idx === 2) toggleTheme();
-          else if (idx === 4) window.open(LEGAL_PRIVACY_URL, '_blank', 'noopener,noreferrer');
-          else if (idx === 5) signOut();
+          else if (idx === 3) feedback.toggleSound();
+          else if (idx === 4) feedback.toggleHaptic();
+          else if (idx === 6) window.open(LEGAL_PRIVACY_URL, '_blank', 'noopener,noreferrer');
+          else if (idx === 7) signOut();
           break;
         }
         case 'search': {
@@ -1287,7 +1303,7 @@ export default function App() {
       loadRecentlyPlayed, loadTrending, playFromList, playContext, openLyrics, toggleShuffle,
       cycleRepeat, toggleTheme, signOut, handleSearchKey, accessToken,
       activeProviderId, musicMenuItems, artistMenuItems, switchSource, audio, youtube, apple, resolveSpotifyToken,
-      entrySources,
+      entrySources, feedback.toggleSound, feedback.toggleHaptic,
     ]
   );
 
@@ -1304,6 +1320,9 @@ export default function App() {
 
   const handleScroll = useCallback(
     (direction: 'up' | 'down') => {
+      // One tick of feedback per discrete scroll step (ClickWheel fires onScroll
+      // once per STEP_DEG, so this is per selection move, not per pixel).
+      feedback.tick();
       if (currentScreen === 'nowPlaying') {
         // Clockwise (down) scrubs forward, counter-clockwise rewinds.
         seekBy(direction === 'down' ? SEEK_STEP_MS : -SEEK_STEP_MS);
@@ -1323,11 +1342,13 @@ export default function App() {
     [
       currentScreen, seekBy, moveSelection, lyrics,
       playlists, albums, artists, tracks, trackSource, musicMenuItems, artistMenuItems, entrySources,
+      feedback.tick,
     ]
   );
 
   const handleClick = useCallback(
     (button: 'menu' | 'next' | 'previous' | 'playPause' | 'select') => {
+      feedback.press();
       switch (button) {
         case 'menu': pop(); break;
         case 'playPause': if (currentTrack) togglePlay(); break;
@@ -1336,7 +1357,7 @@ export default function App() {
         case 'select': doSelect(selectedIndex); break;
       }
     },
-    [selectedIndex, pop, togglePlay, skipNext, skipPrev, doSelect, currentTrack]
+    [selectedIndex, pop, togglePlay, skipNext, skipPrev, doSelect, currentTrack, feedback.press]
   );
 
   function getListLength(screen: Screen): number {
@@ -1415,6 +1436,8 @@ export default function App() {
                   shuffle={shuffle}
                   repeat={repeat}
                   theme={theme}
+                  soundEnabled={feedback.soundEnabled}
+                  hapticEnabled={feedback.hapticEnabled}
                   isPlayerReady={isAudius || isYouTube || isAppleMusic ? true : isReady}
                   playerError={
                     isAudius
@@ -1475,6 +1498,8 @@ interface ScreenProps {
   shuffle: boolean;
   repeat: RepeatMode;
   theme: Theme;
+  soundEnabled: boolean;
+  hapticEnabled: boolean;
   isPlayerReady: boolean;
   playerError: string | null;
   searchQuery: string;
@@ -1590,6 +1615,8 @@ function ScreenContent(props: ScreenProps) {
             { label: 'Shuffle', detail: props.shuffle ? 'On' : 'Off' },
             { label: 'Repeat', detail: repeatLabel(props.repeat) },
             { label: 'Theme', detail: props.theme === 'black' ? 'Classic' : 'White' },
+            { label: 'Click Sound', detail: props.soundEnabled ? 'On' : 'Off' },
+            { label: 'Haptics', detail: props.hapticEnabled ? 'On' : 'Off' },
             { label: 'About', detail: 'v1.0' },
             { label: 'Privacy & Terms', detail: 'bicoastalai.com', arrow: true },
             { label: 'Sign Out', detail: signOutDetail(props.activeProviderId) },
