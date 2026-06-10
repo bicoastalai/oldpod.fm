@@ -98,6 +98,21 @@ export const PROVIDERS: ProviderMeta[] = [
       canSeek: false,
     },
   },
+  {
+    id: 'podcasts',
+    label: 'Podcasts',
+    blurb: 'Shows & episodes, free for all',
+    status: 'ready',
+    capabilities: {
+      needsLogin: false,
+      needsPremiumForPlayback: false,
+      hasLibrary: false,
+      hasArtists: false,
+      hasArtistTopTracks: false,
+      hasSearch: true,
+      canSeek: true,
+    },
+  },
 ];
 
 export function getProviderMeta(id: ProviderId): ProviderMeta | undefined {

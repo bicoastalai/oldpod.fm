@@ -16,6 +16,7 @@ import {
 } from './services/spotify';
 import { createAudiusService } from './services/audius';
 import { createRadioService, reportStationClick } from './services/radio';
+import { createPodcastsService } from './services/podcasts';
 import {
   createYouTubeService,
   isYouTubeKeyConfigured,
@@ -84,7 +85,7 @@ const MAIN_MENU = ['Music', 'Search', 'Now Playing', 'Sources', 'Settings'];
 
 // The Music submenu is built from the active source's capabilities (see
 // `musicMenuItems`); `kind` maps a row to its loader in `doSelect`.
-type MusicMenuKind = 'playlists' | 'albums' | 'artists' | 'recent' | 'trending';
+type MusicMenuKind = 'playlists' | 'albums' | 'artists' | 'recent' | 'trending' | 'trendingAlbums';
 interface MusicMenuEntry {
   label: string;
   kind: MusicMenuKind;
@@ -218,7 +219,8 @@ function isSourceId(value: string | null): value is SourceId {
     value === 'audius' ||
     value === 'youtube' ||
     value === 'applemusic' ||
-    value === 'radio'
+    value === 'radio' ||
+    value === 'podcasts'
   );
 }
 
@@ -300,11 +302,12 @@ export default function App() {
   const isDemoMode = activeSource === 'demo';
   const isAudius = activeProviderId === 'audius';
   const isRadio = activeProviderId === 'radio';
+  const isPodcasts = activeProviderId === 'podcasts';
   const isYouTube = activeProviderId === 'youtube';
   const isAppleMusic = activeProviderId === 'applemusic';
   const isSpotify = activeProviderId === 'spotify';
   // Sources whose playback runs through the shared HTML5 <audio> engine.
-  const usesAudioEngine = isAudius || isRadio;
+  const usesAudioEngine = isAudius || isRadio || isPodcasts;
 
   // Data
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -314,6 +317,8 @@ export default function App() {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [trackSource, setTrackSource] = useState<PlaySource | null>(null);
   const [tracksTitle, setTracksTitle] = useState('Songs');
+  // The albums screen doubles as podcast show lists ("Top Podcasts" / results).
+  const [albumsTitle, setAlbumsTitle] = useState('Albums');
   const [isLoading, setIsLoading] = useState(false);
 
   // Search
@@ -391,7 +396,8 @@ export default function App() {
   // engine's controls are stable callbacks, so this only changes when the
   // active source changes.
   const activePlayer = useMemo<TrackPlayer | null>(() => {
-    if (isAudius) {
+    // Audius tracks and podcast episodes are both plain, seekable audio URLs.
+    if (isAudius || isPodcasts) {
       return {
         loadAndPlay: (track) => audio.loadAndPlay(track.uri),
         pause: audio.pause,
@@ -438,7 +444,7 @@ export default function App() {
     }
     return null;
   }, [
-    isAudius, isRadio, isYouTube, isAppleMusic,
+    isAudius, isPodcasts, isRadio, isYouTube, isAppleMusic,
     audio.loadAndPlay, audio.pause, audio.resume, audio.seek, audio.setVolume, audio.stop,
     youtube.loadAndPlay, youtube.pause, youtube.resume, youtube.seek, youtube.setVolume, youtube.stop,
     apple.loadAndPlay, apple.pause, apple.resume, apple.seek, apple.setVolume, apple.stop,
@@ -497,6 +503,7 @@ export default function App() {
     if (activeSource === 'demo') setService(createMockService());
     else if (activeSource === 'audius') setService(createAudiusService());
     else if (activeSource === 'radio') setService(createRadioService());
+    else if (activeSource === 'podcasts') setService(createPodcastsService());
     else if (activeSource === 'youtube') setService(createYouTubeService());
     else if (activeSource === 'applemusic') setService(createAppleMusicService());
     else setService(createSpotifyService(resolveSpotifyToken));
@@ -636,6 +643,7 @@ export default function App() {
     if (!service) return;
     setIsLoading(true);
     setDataError(null);
+    setAlbumsTitle('Albums');
     try {
       setAlbums(await service.getAlbums());
     } catch (e) {
@@ -681,14 +689,19 @@ export default function App() {
       setTracksTitle(album.name);
       setTrackSource({ contextUri: album.uri });
       try {
-        setTracks(await service.getAlbumTracks(album));
+        const data = await service.getAlbumTracks(album);
+        setTracks(data);
+        // Single-track engines (Audius / radio / podcasts / YouTube / Apple)
+        // play explicit track lists; only context-capable providers (Spotify,
+        // demo) keep the "play the whole context" fallback row when empty.
+        if (activePlayer) setTrackSource(data.length > 0 ? { uris: data.map((t) => t.uri) } : null);
       } catch (e) {
         setDataError(describeDataError(e, 'Could not load album'));
       } finally {
         setIsLoading(false);
       }
     },
-    [service]
+    [service, activePlayer]
   );
 
   const loadArtists = useCallback(async () => {
@@ -713,6 +726,7 @@ export default function App() {
       setIsLoading(true);
       setDataError(null);
       setAlbums([]);
+      setAlbumsTitle('Albums');
       try {
         const data = await service.getArtistAlbums(artist);
         setAlbums(data);
@@ -783,11 +797,45 @@ export default function App() {
     }
   }, [service]);
 
+  // Podcasts' default browse list: the Apple top-podcasts chart, shown on the
+  // albums screen (shows drill into episodes like album → tracks).
+  const loadTrendingShows = useCallback(async () => {
+    if (!service?.getTrendingAlbums) return;
+    setIsLoading(true);
+    setDataError(null);
+    setAlbums([]);
+    setAlbumsTitle('Top Podcasts');
+    try {
+      const data = await service.getTrendingAlbums();
+      setAlbums(data);
+      if (data.length === 0) setDataError('No podcasts');
+    } catch (e) {
+      setDataError(describeDataError(e, 'Could not load podcasts'));
+    } finally {
+      setIsLoading(false);
+    }
+  }, [service]);
+
   const runSearch = useCallback(
     async (query: string) => {
       if (!service) return;
       setIsLoading(true);
       setDataError(null);
+      // Collection-shaped sources (podcasts) search for shows, not tracks.
+      if (service.searchAlbums) {
+        setAlbums([]);
+        setAlbumsTitle('Podcasts');
+        try {
+          const data = await service.searchAlbums(query);
+          setAlbums(data);
+          if (data.length === 0) setDataError('No results');
+        } catch (e) {
+          setDataError(describeDataError(e, 'Search failed'));
+        } finally {
+          setIsLoading(false);
+        }
+        return;
+      }
       setTracks([]);
       setTracksTitle('Results');
       try {
@@ -1081,10 +1129,12 @@ export default function App() {
       const q = value.trim();
       if (!q) return;
       setSearchQuery(value);
-      push('tracks');
+      // Collection-shaped sources land on the albums screen (shows), flat
+      // sources on the track list.
+      push(service?.searchAlbums ? 'albums' : 'tracks');
       void runSearch(value);
     },
-    [runSearch, push]
+    [runSearch, push, service]
   );
 
   const handleSearchKey = useCallback(
@@ -1113,6 +1163,7 @@ export default function App() {
     if (caps?.hasArtists) items.push({ label: 'Artists', kind: 'artists' });
     if (caps?.hasLibrary) items.push({ label: 'Recently Played', kind: 'recent' });
     if (service?.getTrending) items.push({ label: 'Trending', kind: 'trending' });
+    if (service?.getTrendingAlbums) items.push({ label: 'Top Podcasts', kind: 'trendingAlbums' });
     return items;
   }, [activeProviderId, service]);
 
@@ -1313,6 +1364,9 @@ export default function App() {
           } else if (item.kind === 'trending') {
             push('tracks');
             void loadTrending();
+          } else if (item.kind === 'trendingAlbums') {
+            push('albums');
+            void loadTrendingShows();
           }
           break;
         }
@@ -1393,7 +1447,7 @@ export default function App() {
       currentScreen, push, playlists, albums, artists, selectedArtist, tracks, trackSource,
       loadPlaylists, loadAlbums, loadArtists, loadArtistAlbums, loadArtistTopTracks,
       loadPlaylistTracks, loadAlbumTracks,
-      loadRecentlyPlayed, loadTrending, playFromList, playContext, openLyrics, toggleShuffle,
+      loadRecentlyPlayed, loadTrending, loadTrendingShows, playFromList, playContext, openLyrics, toggleShuffle,
       cycleRepeat, toggleTheme, handleSearchKey,
       activeProviderId, activeSource, musicMenuItems, artistMenuItems, settingsItems,
       switchSource, signOutSpotify, disconnectAppleMusic,
@@ -1477,7 +1531,12 @@ export default function App() {
 
   // ── Screen title ──────────────────────────────────────────
 
-  const screenTitle = currentScreen === 'tracks' ? tracksTitle : SCREEN_TITLES[currentScreen];
+  const screenTitle =
+    currentScreen === 'tracks'
+      ? tracksTitle
+      : currentScreen === 'albums'
+        ? albumsTitle
+        : SCREEN_TITLES[currentScreen];
 
   // YouTube's ToS expects the IFrame player to stay visible during playback
   // (not audio-only/hidden). So while a YouTube video is loaded we show it large

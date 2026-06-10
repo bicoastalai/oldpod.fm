@@ -8,7 +8,14 @@
  * registry entry plus an implementation — no UI changes required.
  *
  */
-export type ProviderId = 'demo' | 'spotify' | 'audius' | 'youtube' | 'applemusic' | 'radio';
+export type ProviderId =
+  | 'demo'
+  | 'spotify'
+  | 'audius'
+  | 'youtube'
+  | 'applemusic'
+  | 'radio'
+  | 'podcasts';
 
 export interface Track {
   id: string;
@@ -101,6 +108,13 @@ export interface MusicProvider {
   // Optional default browse list (e.g. Audius "Trending"). Present when a
   // source has no personal library but can surface a curated/popular feed.
   getTrending?(): Promise<Track[]>;
+  // Optional collection-shaped search/browse (e.g. Podcasts: a search returns
+  // shows that drill into episode lists, like album → tracks). When
+  // `searchAlbums` is present the UI routes text search to album results
+  // instead of a flat track list; `getTrendingAlbums` is the matching
+  // curated default list (e.g. "Top Podcasts").
+  searchAlbums?(query: string): Promise<Album[]>;
+  getTrendingAlbums?(): Promise<Album[]>;
   // Optional artist browsing — present only when capabilities.hasArtists.
   getArtists?(): Promise<Artist[]>;
   getArtistAlbums?(artist: Artist): Promise<Album[]>;
