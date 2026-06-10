@@ -86,8 +86,8 @@ export const PROVIDERS: ProviderMeta[] = [
   {
     id: 'radio',
     label: 'Radio',
-    blurb: 'Live stations worldwide (coming soon)',
-    status: 'planned',
+    blurb: 'Live stations worldwide',
+    status: 'ready',
     capabilities: {
       needsLogin: false,
       needsPremiumForPlayback: false,

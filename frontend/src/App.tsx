@@ -15,6 +15,7 @@ import {
   formatTime,
 } from './services/spotify';
 import { createAudiusService } from './services/audius';
+import { createRadioService, reportStationClick } from './services/radio';
 import {
   createYouTubeService,
   isYouTubeKeyConfigured,
@@ -208,7 +209,7 @@ const ENTRY_SOURCES: EntrySource[] = [
 
 // A source the user can actually be *in* (every ready provider). Persisted in
 // localStorage under `source` so returning users skip the entry gate.
-type SourceId = Exclude<ProviderId, 'radio'>;
+type SourceId = ProviderId;
 
 function isSourceId(value: string | null): value is SourceId {
   return (
@@ -216,7 +217,8 @@ function isSourceId(value: string | null): value is SourceId {
     value === 'spotify' ||
     value === 'audius' ||
     value === 'youtube' ||
-    value === 'applemusic'
+    value === 'applemusic' ||
+    value === 'radio'
   );
 }
 
@@ -297,9 +299,12 @@ export default function App() {
   const activeProviderId: ProviderId = activeSource ?? 'spotify';
   const isDemoMode = activeSource === 'demo';
   const isAudius = activeProviderId === 'audius';
+  const isRadio = activeProviderId === 'radio';
   const isYouTube = activeProviderId === 'youtube';
   const isAppleMusic = activeProviderId === 'applemusic';
   const isSpotify = activeProviderId === 'spotify';
+  // Sources whose playback runs through the shared HTML5 <audio> engine.
+  const usesAudioEngine = isAudius || isRadio;
 
   // Data
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -396,6 +401,21 @@ export default function App() {
         stop: audio.stop,
       };
     }
+    if (isRadio) {
+      return {
+        loadAndPlay: (track) => {
+          // Radio Browser etiquette: count a click when a station starts.
+          reportStationClick(track.id);
+          return audio.loadAndPlay(track.uri);
+        },
+        pause: audio.pause,
+        resume: audio.resume,
+        // Live streams aren't seekable — keep wheel scrubbing a silent no-op.
+        seek: () => {},
+        setVolume: audio.setVolume,
+        stop: audio.stop,
+      };
+    }
     if (isYouTube) {
       return {
         loadAndPlay: (track) => youtube.loadAndPlay(track.id),
@@ -418,7 +438,7 @@ export default function App() {
     }
     return null;
   }, [
-    isAudius, isYouTube, isAppleMusic,
+    isAudius, isRadio, isYouTube, isAppleMusic,
     audio.loadAndPlay, audio.pause, audio.resume, audio.seek, audio.setVolume, audio.stop,
     youtube.loadAndPlay, youtube.pause, youtube.resume, youtube.seek, youtube.setVolume, youtube.stop,
     apple.loadAndPlay, apple.pause, apple.resume, apple.seek, apple.setVolume, apple.stop,
@@ -426,7 +446,7 @@ export default function App() {
 
   // Position/playing state of the active single-track engine, for syncing into
   // the shared UI playback state below.
-  const activePlayerState = isAudius
+  const activePlayerState = usesAudioEngine
     ? audio.audioState
     : isYouTube
       ? youtube.playerState
@@ -476,6 +496,7 @@ export default function App() {
     }
     if (activeSource === 'demo') setService(createMockService());
     else if (activeSource === 'audius') setService(createAudiusService());
+    else if (activeSource === 'radio') setService(createRadioService());
     else if (activeSource === 'youtube') setService(createYouTubeService());
     else if (activeSource === 'applemusic') setService(createAppleMusicService());
     else setService(createSpotifyService(resolveSpotifyToken));
@@ -913,6 +934,12 @@ export default function App() {
   useEffect(() => {
     singleTrackEndedRef.current = () => {
       if (!activePlayer) return;
+      // A live radio stream only "ends" when the connection drops — never
+      // auto-advance to another station; just reflect the stopped state.
+      if (isRadio) {
+        setIsPlaying(false);
+        return;
+      }
       const list = playingTracksRef.current;
       if (repeat === 'track') {
         const t = list[currentTrackIndex] ?? currentTrack;
@@ -938,7 +965,7 @@ export default function App() {
       }
       setIsPlaying(false);
     };
-  }, [repeat, shuffle, currentTrackIndex, currentTrack, activePlayer]);
+  }, [repeat, shuffle, currentTrackIndex, currentTrack, activePlayer, isRadio]);
 
   const adjustVolume = useCallback(
     (delta: number) => {
@@ -963,6 +990,8 @@ export default function App() {
     (deltaMs: number) => {
       const track = currentTrack;
       if (!track) return;
+      // Live streams (radio) have no duration — scrubbing is a silent no-op.
+      if (track.durationMs <= 0) return;
       const target = Math.max(0, Math.min(track.durationMs, positionRef.current + deltaMs));
       positionRef.current = target;
       setPositionMs(target);
@@ -1492,7 +1521,7 @@ export default function App() {
                   positionMs={positionMs}
                   volume={volume}
                   volumeControllable={
-                    isAudius
+                    usesAudioEngine
                       ? audio.volumeControllable
                       : isYouTube
                         ? youtube.volumeControllable
@@ -1502,9 +1531,9 @@ export default function App() {
                   }
                   shuffle={shuffle}
                   repeat={repeat}
-                  isPlayerReady={isAudius || isYouTube || isAppleMusic ? true : isReady}
+                  isPlayerReady={usesAudioEngine || isYouTube || isAppleMusic ? true : isReady}
                   playerError={
-                    isAudius
+                    usesAudioEngine
                       ? audio.audioError
                       : isYouTube
                         ? youtube.playerError
@@ -1970,7 +1999,10 @@ function NowPlayingScreen({
     );
   }
 
-  const pct = Math.min(100, (positionMs / track.durationMs) * 100);
+  // Live streams (radio) report no duration: avoid NaN progress and show a
+  // LIVE marker instead of a (meaningless) remaining time.
+  const isLive = track.durationMs <= 0;
+  const pct = isLive ? 0 : Math.min(100, (positionMs / track.durationMs) * 100);
   const artColor = albumArtPlaceholder(track.album);
 
   return (
@@ -2016,7 +2048,7 @@ function NowPlayingScreen({
       {/* Times */}
       <div className="time-row">
         <span>{formatTime(positionMs)}</span>
-        <span>-{formatTime(Math.max(0, track.durationMs - positionMs))}</span>
+        <span>{isLive ? 'LIVE' : `-${formatTime(Math.max(0, track.durationMs - positionMs))}`}</span>
       </div>
 
       {/* Volume — on iOS/touch the system locks audio to the hardware buttons
@@ -2036,7 +2068,11 @@ function NowPlayingScreen({
         <div className="np-hint np-hint--error">{playerError}</div>
       ) : (
         <div className="np-hint">
-          {!isPlayerReady ? 'Play a song to connect audio' : 'Wheel · Seek   Center · Lyrics'}
+          {!isPlayerReady
+            ? 'Play a song to connect audio'
+            : isLive
+              ? 'Live stream   Center · Lyrics'
+              : 'Wheel · Seek   Center · Lyrics'}
         </div>
       )}
 
