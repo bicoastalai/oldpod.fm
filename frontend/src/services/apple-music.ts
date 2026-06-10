@@ -128,8 +128,10 @@ async function fetchDeveloperToken(): Promise<DeveloperTokenResult> {
   let res: Response;
   try {
     // The token is minted per-request and short-lived; 'no-store' keeps the
-    // HTTP cache from ever replaying an expired/revoked one.
-    res = await fetch(DEVELOPER_TOKEN_ENDPOINT, {
+    // HTTP cache from ever replaying an expired/revoked one, and the unique
+    // query param defeats the v1 service worker's URL-keyed cache on devices
+    // where it still controls the page (it cached this endpoint forever).
+    res = await fetch(`${DEVELOPER_TOKEN_ENDPOINT}?t=${Date.now()}`, {
       headers: { accept: 'application/json' },
       cache: 'no-store',
       signal: controller.signal,
