@@ -29,6 +29,7 @@ import {
   ensureAppleMusicConfigured,
   getAppleMusicBootstrapFailureMessage,
   prewarmAppleMusic,
+  unauthorizeAppleMusic,
 } from './services/apple-music';
 import type {
   Album,
@@ -46,6 +47,7 @@ import {
   exchangeCodeForToken,
   getRedirectUriWarning,
   getStoredToken,
+  isSpotifyConnected,
   logout,
   refreshAccessToken,
   redirectToSpotifyLogin,
@@ -94,16 +96,25 @@ interface ArtistMenuEntry {
   label: string;
   kind: ArtistMenuKind;
 }
-const SETTINGS_MENU = [
-  'Shuffle',
-  'Repeat',
-  'Theme',
-  'Click Sound',
-  'Haptics',
-  'About',
-  'Privacy & Terms',
-  'Sign Out',
-];
+// Settings rows carry an action kind because the list is dynamic: per-provider
+// sign-out rows appear only for providers with a stored connection.
+type SettingsKind =
+  | 'shuffle'
+  | 'repeat'
+  | 'theme'
+  | 'sound'
+  | 'haptics'
+  | 'about'
+  | 'privacy'
+  | 'terms'
+  | 'signOutSpotify'
+  | 'disconnectApple';
+interface SettingsEntry {
+  label: string;
+  detail?: string;
+  arrow?: boolean;
+  kind: SettingsKind;
+}
 
 const REPEAT_ORDER: RepeatMode[] = ['off', 'context', 'track'];
 
@@ -167,23 +178,6 @@ function repeatLabel(mode: RepeatMode): string {
   return mode === 'off' ? 'Off' : mode === 'context' ? 'All' : 'One';
 }
 
-// Short hint on the Sign Out row naming what leaving the current source does.
-function signOutDetail(providerId: ProviderId): string {
-  if (providerId === 'demo') return 'Exit demo';
-  return getProviderMeta(providerId)?.label ?? 'Spotify';
-}
-
-// A row on the "Choose your music" entry gate, derived from a provider's
-// capabilities (see `buildEntrySources`).
-interface EntrySource {
-  id: ProviderId;
-  label: string;
-  /** Sets expectations by requirement, not marketing (e.g. "No account needed"). */
-  requirement: string;
-  /** Drives ordering/grouping: no-login real sources lead, demo, then sign-in. */
-  group: 'free' | 'demo' | 'signin';
-}
-
 // Requirement phrasing shared by the entry gate and the Sources screen so the
 // two stay in sync. Speaks to what the user needs, not Free/Premium marketing.
 function requirementLabel(p: ProviderMeta): string {
@@ -194,33 +188,57 @@ function requirementLabel(p: ProviderMeta): string {
   return 'No account needed';
 }
 
-// Entry-gate copy: leads with value, labels Demo honestly as a tire-kicker.
-function entryRequirement(p: ProviderMeta): string {
-  if (p.id === 'demo') return 'Just looking · sample tracks';
-  if (p.capabilities.needsLogin) {
-    return p.capabilities.needsPremiumForPlayback ? 'Sign in · Premium to play' : 'Sign in required';
-  }
-  return 'No account needed';
+// A row on the first-run entry gate. The gate is intentionally a fixed,
+// three-row decision (free vs. the two premium accounts); every other source
+// (YouTube, Demo) lives in Main Menu › Sources.
+interface EntrySource {
+  id: SourceId;
+  label: string;
+  /** Status-line text shown only while this row is highlighted. */
+  detail: string;
 }
 
-// Build the entry gate dynamically from the registry: free no-login real
-// sources first (Audius), Demo next (clearly a sample), sign-in sources last.
-// Planned sources stay off the gate to avoid clutter.
-function buildEntrySources(providers: ProviderMeta[]): EntrySource[] {
-  const ready = providers.filter((p) => p.status === 'ready');
-  const group = (p: ProviderMeta): EntrySource['group'] =>
-    p.id === 'demo' ? 'demo' : p.capabilities.needsLogin ? 'signin' : 'free';
-  const order: Record<EntrySource['group'], number> = { free: 0, demo: 1, signin: 2 };
-  return ready
-    .map((p) => ({ id: p.id, label: p.label, requirement: entryRequirement(p), group: group(p) }))
-    .sort((a, b) => order[a.group] - order[b.group]);
+const ENTRY_SOURCES: EntrySource[] = [
+  { id: 'audius', label: 'Listen Free', detail: 'No account needed' },
+  { id: 'spotify', label: 'Spotify', detail: 'Sign in · Premium to play' },
+  { id: 'applemusic', label: 'Apple Music', detail: 'Sign in · Premium to play' },
+];
+
+// ── Active-source persistence ──────────────────────────────
+
+// A source the user can actually be *in* (every ready provider). Persisted in
+// localStorage under `source` so returning users skip the entry gate.
+type SourceId = Exclude<ProviderId, 'radio'>;
+
+function isSourceId(value: string | null): value is SourceId {
+  return (
+    value === 'demo' ||
+    value === 'spotify' ||
+    value === 'audius' ||
+    value === 'youtube' ||
+    value === 'applemusic'
+  );
+}
+
+// The remembered active source, or null for first-run/signed-out users (gate).
+// Falls back to the legacy keys (`demo_mode`, bare Spotify tokens) written
+// before `source` covered every provider.
+function getStoredSource(): SourceId | null {
+  const stored = localStorage.getItem('source');
+  if (isSourceId(stored)) return stored;
+  if (localStorage.getItem('demo_mode') === '1') return 'demo';
+  if (isSpotifyConnected()) return 'spotify';
+  return null;
 }
 
 // ── App ────────────────────────────────────────────────────
 
 export default function App() {
-  // Navigation
-  const [nav, setNav] = useState<NavEntry[]>([{ screen: 'login', index: 0 }]);
+  // Navigation. Returning users (any remembered source) boot straight into the
+  // main menu; only first-run/signed-out users see the entry gate.
+  const [nav, setNav] = useState<NavEntry[]>(() => [
+    { screen: getStoredSource() ? 'mainMenu' : 'login', index: 0 },
+  ]);
   const cur = nav[nav.length - 1];
   const currentScreen = cur.screen;
   const selectedIndex = cur.index;
@@ -251,28 +269,17 @@ export default function App() {
     );
   }, []);
 
-  // Auth
+  // Auth / source. Connections are independent of the active source: signing
+  // into one provider never disturbs another's stored session, and the Sources
+  // screen switches between connected providers without re-auth.
   const [accessToken, setAccessToken] = useState<string | null>(getStoredToken);
-  const [isDemoMode, setIsDemoMode] = useState(() => {
-    if (getStoredToken() || localStorage.getItem('spot_refresh')) return false;
-    return localStorage.getItem('demo_mode') === '1';
-  });
-  // Audius is a login-less source; remember it across reloads like demo mode.
-  const [isAudiusMode, setIsAudiusMode] = useState(() => {
-    if (getStoredToken() || localStorage.getItem('spot_refresh')) return false;
-    return localStorage.getItem('source') === 'audius';
-  });
-  // YouTube is another login-less source, remembered the same way.
-  const [isYouTubeMode, setIsYouTubeMode] = useState(() => {
-    if (getStoredToken() || localStorage.getItem('spot_refresh')) return false;
-    return localStorage.getItem('source') === 'youtube';
-  });
-  // Apple Music is a premium, logged-in source; MusicKit persists the user's
-  // own authorization, so we just remember the selected source like the others.
-  const [isAppleMusicMode, setIsAppleMusicMode] = useState(() => {
-    if (getStoredToken() || localStorage.getItem('spot_refresh')) return false;
-    return localStorage.getItem('source') === 'applemusic';
-  });
+  const [activeSource, setActiveSource] = useState<SourceId | null>(getStoredSource);
+  const [spotifyConnected, setSpotifyConnected] = useState(isSpotifyConnected);
+  // MusicKit's own persisted authorization isn't queryable synchronously at
+  // boot (configure is async), so we mirror it in an `apple_connected` flag.
+  const [appleConnected, setAppleConnected] = useState(
+    () => localStorage.getItem('apple_connected') === '1'
+  );
   const [dataError, setDataError] = useState<string | null>(null);
   // Feedback shown on the source-selection screens (entry gate + Sources) while
   // connecting to / failing to reach a source that needs config or sign-in.
@@ -285,17 +292,10 @@ export default function App() {
   const [service, setService] = useState<ActiveMusicService | null>(null);
 
   // Which source is currently active (drives the Sources screen highlight).
-  const activeProviderId: ProviderId =
-    service?.meta.id ??
-    (isDemoMode
-      ? 'demo'
-      : isAudiusMode
-        ? 'audius'
-        : isYouTubeMode
-          ? 'youtube'
-          : isAppleMusicMode
-            ? 'applemusic'
-            : 'spotify');
+  // Defaults to Spotify only for screens that need *a* provider id while the
+  // user is still on the gate (no source committed yet).
+  const activeProviderId: ProviderId = activeSource ?? 'spotify';
+  const isDemoMode = activeSource === 'demo';
   const isAudius = activeProviderId === 'audius';
   const isYouTube = activeProviderId === 'youtube';
   const isAppleMusic = activeProviderId === 'applemusic';
@@ -470,36 +470,48 @@ export default function App() {
   // ── Init service + session bootstrap ─────────────────────
 
   useEffect(() => {
-    if (isDemoMode) {
-      setService(createMockService());
+    if (activeSource === null) {
+      setService(null);
       return;
     }
-    if (isAudiusMode) {
-      setService(createAudiusService());
-      return;
-    }
-    if (isYouTubeMode) {
-      setService(createYouTubeService());
-      return;
-    }
-    if (isAppleMusicMode) {
-      setService(createAppleMusicService());
-      return;
-    }
-    setService(createSpotifyService(resolveSpotifyToken));
-  }, [isDemoMode, isAudiusMode, isYouTubeMode, isAppleMusicMode, resolveSpotifyToken]);
+    if (activeSource === 'demo') setService(createMockService());
+    else if (activeSource === 'audius') setService(createAudiusService());
+    else if (activeSource === 'youtube') setService(createYouTubeService());
+    else if (activeSource === 'applemusic') setService(createAppleMusicService());
+    else setService(createSpotifyService(resolveSpotifyToken));
+  }, [activeSource, resolveSpotifyToken]);
 
+  // Validate the remembered source once at boot. If it can't initialize
+  // (YouTube key missing, Apple Music bootstrap fails), fall back to the gate
+  // with the specific inline notice instead of leaving the user in a dead mode.
+  const bootValidatedRef = useRef(false);
   useEffect(() => {
-    if (isDemoMode || isAudiusMode || isYouTubeMode || isAppleMusicMode) {
-      if (nav[0]?.screen === 'login') setNav([{ screen: 'mainMenu', index: 0 }]);
+    if (bootValidatedRef.current) return;
+    bootValidatedRef.current = true;
+    const fallBackToGate = (notice: string) => {
+      localStorage.removeItem('source');
+      setActiveSource(null);
+      setSourceNotice(notice);
+      setNav([{ screen: 'login', index: 0 }]);
+    };
+    if (activeSource === 'youtube' && !isYouTubeKeyConfigured()) {
+      fallBackToGate(YOUTUBE_NO_KEY_MESSAGE);
       return;
     }
-    void resolveSpotifyToken().then((tok) => {
-      if (tok && nav[0]?.screen === 'login') {
-        setNav([{ screen: 'mainMenu', index: 0 }]);
-      }
-    });
-  }, [isDemoMode, isAudiusMode, isYouTubeMode, isAppleMusicMode, resolveSpotifyToken]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (activeSource === 'applemusic') {
+      void ensureAppleMusicConfigured().then((music) => {
+        if (music) {
+          // Migrate pre-flag sessions: MusicKit kept the user authorized.
+          if (music.isAuthorized) {
+            localStorage.setItem('apple_connected', '1');
+            setAppleConnected(true);
+          }
+          return;
+        }
+        fallBackToGate(getAppleMusicBootstrapFailureMessage() ?? APPLE_UNAVAILABLE_MESSAGE);
+      });
+    }
+  }, [activeSource]);
 
   // Pre-warm the MusicKit bootstrap while a source-selection screen is up, so
   // tapping Apple Music calls authorize() within the tap's user activation —
@@ -519,10 +531,11 @@ export default function App() {
     if (!code) return;
     window.history.replaceState(null, '', window.location.pathname);
     exchangeCodeForToken(code).then((tok) => {
+      localStorage.setItem('source', 'spotify');
       localStorage.removeItem('demo_mode');
-      setIsDemoMode(false);
       setAccessToken(tok);
-      setService(createSpotifyService(resolveSpotifyToken));
+      setSpotifyConnected(true);
+      setActiveSource('spotify');
       setNav([{ screen: 'mainMenu', index: 0 }]);
     }).catch(console.error);
   }, []);
@@ -992,33 +1005,6 @@ export default function App() {
     setTheme((t) => (t === 'black' ? 'light' : 'black'));
   }, []);
 
-  const signOut = useCallback(() => {
-    logout();
-    localStorage.removeItem('demo_mode');
-    localStorage.removeItem('source');
-    audio.stop();
-    youtube.stop();
-    apple.stop();
-    setAccessToken(null);
-    setIsDemoMode(false);
-    setIsAudiusMode(false);
-    setIsYouTubeMode(false);
-    setIsAppleMusicMode(false);
-    setService(null);
-    setPlaylists([]);
-    setAlbums([]);
-    setArtists([]);
-    setSelectedArtist(null);
-    setTracks([]);
-    setTrackSource(null);
-    setCurrentTrack(null);
-    setIsPlaying(false);
-    setPositionMs(0);
-    setDataError(null);
-    setSourceNotice(null);
-    setNav([{ screen: 'login', index: 0 }]);
-  }, [audio, youtube, apple]);
-
   // ── Lyrics ────────────────────────────────────────────────
 
   // Prefetch lyrics as soon as a track becomes current — not only when the
@@ -1113,14 +1099,13 @@ export default function App() {
     return items;
   }, [activeProviderId, service]);
 
-  // Entry-gate rows, capability-driven (free no-login first → demo → sign-in).
-  const entrySources = useMemo(() => buildEntrySources(PROVIDERS), []);
-
-  // Commit to a source: reset playback, point the active service at it, and drop
-  // into the main menu. Only called once a source is known to be usable (config
-  // present, sign-in succeeded) so the user never lands in a broken mode.
+  // Commit to a source: reset playback, persist the choice, and drop into the
+  // main menu (the service-init effect swaps the active service). Only called
+  // once a source is known to be usable (config present, sign-in succeeded) so
+  // the user never lands in a broken mode. Never touches other providers'
+  // stored sessions — switching is not signing out.
   const commitSource = useCallback(
-    (target: 'demo' | 'audius' | 'youtube' | 'applemusic') => {
+    (target: SourceId) => {
       audio.stop();
       youtube.stop();
       apple.stop();
@@ -1131,27 +1116,9 @@ export default function App() {
       setSourceNotice(null);
       setTracks([]);
       setTrackSource(null);
-      setIsDemoMode(target === 'demo');
-      setIsAudiusMode(target === 'audius');
-      setIsYouTubeMode(target === 'youtube');
-      setIsAppleMusicMode(target === 'applemusic');
-      if (target === 'demo') {
-        localStorage.setItem('demo_mode', '1');
-        localStorage.removeItem('source');
-        setService(createMockService());
-      } else if (target === 'audius') {
-        localStorage.setItem('source', 'audius');
-        localStorage.removeItem('demo_mode');
-        setService(createAudiusService());
-      } else if (target === 'youtube') {
-        localStorage.setItem('source', 'youtube');
-        localStorage.removeItem('demo_mode');
-        setService(createYouTubeService());
-      } else {
-        localStorage.setItem('source', 'applemusic');
-        localStorage.removeItem('demo_mode');
-        setService(createAppleMusicService());
-      }
+      localStorage.setItem('source', target);
+      localStorage.removeItem('demo_mode');
+      setActiveSource(target);
       setNav([{ screen: 'mainMenu', index: 0 }]);
     },
     [audio, youtube, apple]
@@ -1187,18 +1154,21 @@ export default function App() {
         setSourceNotice(APPLE_SIGN_IN_CANCELLED_MESSAGE);
         return;
       }
+      localStorage.setItem('apple_connected', '1');
+      setAppleConnected(true);
       commitSource('applemusic');
     } finally {
       appleConnectingRef.current = false;
     }
   }, [commitSource]);
 
-  // Entry point for selecting a non-Spotify source. Sources that can't be used
-  // communicate that at selection time and keep the user on the current screen:
-  // YouTube without an API key shows the needs-setup notice; Apple Music runs its
-  // sign-in flow first. Demo/Audius are always usable, so they commit directly.
+  // Entry point for selecting any source (gate + Sources screen). Sources that
+  // can't be used communicate that at selection time and keep the user on the
+  // current screen: YouTube without an API key shows the needs-setup notice;
+  // Apple Music runs its sign-in flow first (instant when already authorized).
+  // Connected Spotify switches without re-auth; otherwise it starts OAuth.
   const switchSource = useCallback(
-    (target: 'demo' | 'audius' | 'youtube' | 'applemusic') => {
+    (target: SourceId) => {
       if (target === 'youtube' && !isYouTubeKeyConfigured()) {
         setSourceNotice(YOUTUBE_NO_KEY_MESSAGE);
         return;
@@ -1207,10 +1177,59 @@ export default function App() {
         void connectAppleMusic();
         return;
       }
+      if (target === 'spotify') {
+        if (spotifyConnected) commitSource('spotify');
+        else void redirectToSpotifyLogin();
+        return;
+      }
       commitSource(target);
     },
-    [commitSource, connectAppleMusic]
+    [commitSource, connectAppleMusic, spotifyConnected]
   );
+
+  // ── Per-provider sign-out ─────────────────────────────────
+
+  // Signing out of one provider never disturbs the others. Leaving the ACTIVE
+  // provider falls back to Audius — free, no-login, always usable — so the app
+  // never strands the user on a dead screen.
+  const signOutSpotify = useCallback(() => {
+    logout();
+    setAccessToken(null);
+    setSpotifyConnected(false);
+    if (activeSource === 'spotify') commitSource('audius');
+  }, [activeSource, commitSource]);
+
+  const disconnectAppleMusic = useCallback(() => {
+    localStorage.removeItem('apple_connected');
+    setAppleConnected(false);
+    void unauthorizeAppleMusic();
+    if (activeSource === 'applemusic') commitSource('audius');
+  }, [activeSource, commitSource]);
+
+  // Settings rows. Sign-out rows are per-provider and only render for
+  // providers with a stored connection; legal links live here (not the gate).
+  const settingsItems = useMemo<SettingsEntry[]>(() => {
+    const items: SettingsEntry[] = [
+      { label: 'Shuffle', detail: shuffle ? 'On' : 'Off', kind: 'shuffle' },
+      { label: 'Repeat', detail: repeatLabel(repeat), kind: 'repeat' },
+      { label: 'Theme', detail: theme === 'black' ? 'Classic' : 'White', kind: 'theme' },
+      { label: 'Click Sound', detail: feedback.soundEnabled ? 'On' : 'Off', kind: 'sound' },
+      { label: 'Haptics', detail: feedback.hapticEnabled ? 'On' : 'Off', kind: 'haptics' },
+      { label: 'About', detail: 'v1.0', kind: 'about' },
+      { label: 'Privacy Policy', detail: 'bicoastalai.com', arrow: true, kind: 'privacy' },
+      { label: 'Terms of Use', detail: 'bicoastalai.com', arrow: true, kind: 'terms' },
+    ];
+    if (spotifyConnected) {
+      items.push({ label: 'Sign Out of Spotify', kind: 'signOutSpotify' });
+    }
+    if (appleConnected) {
+      items.push({ label: 'Disconnect Apple Music', kind: 'disconnectApple' });
+    }
+    return items;
+  }, [
+    shuffle, repeat, theme, feedback.soundEnabled, feedback.hapticEnabled,
+    spotifyConnected, appleConnected,
+  ]);
 
   // ── Select action (takes explicit index to avoid stale closure) ──
 
@@ -1218,23 +1237,8 @@ export default function App() {
     (idx: number) => {
       switch (currentScreen) {
         case 'login': {
-          const src = entrySources[idx];
-          if (!src) break;
-          if (src.id === 'audius') {
-            switchSource('audius');
-          } else if (src.id === 'youtube') {
-            switchSource('youtube');
-          } else if (src.id === 'applemusic') {
-            switchSource('applemusic');
-          } else if (src.id === 'demo') {
-            switchSource('demo');
-          } else if (src.id === 'spotify') {
-            setIsDemoMode(false);
-            setIsAudiusMode(false);
-            setIsYouTubeMode(false);
-            setIsAppleMusicMode(false);
-            redirectToSpotifyLogin();
-          }
+          const src = ENTRY_SOURCES[idx];
+          if (src) switchSource(src.id);
           break;
         }
         case 'mainMenu': {
@@ -1251,45 +1255,14 @@ export default function App() {
         case 'sources': {
           const p = PROVIDERS[idx];
           if (!p) break;
-          if (p.id === activeProviderId) {
+          if (p.id === activeProviderId && activeSource !== null) {
             setSourceNotice(null);
             setNav([{ screen: 'mainMenu', index: 0 }]);
           } else if (p.status === 'planned') {
             setSourceNotice(null);
             setDataError(`${p.label} — ${p.blurb}`);
-          } else if (p.id === 'demo') {
-            switchSource('demo');
-          } else if (p.id === 'audius') {
-            switchSource('audius');
-          } else if (p.id === 'youtube') {
-            switchSource('youtube');
-          } else if (p.id === 'applemusic') {
-            switchSource('applemusic');
-          } else if (p.id === 'spotify') {
-            if (accessToken) {
-              // Already authenticated — switch the active service back to Spotify.
-              localStorage.removeItem('demo_mode');
-              localStorage.removeItem('source');
-              audio.stop();
-              youtube.stop();
-              apple.stop();
-              setCurrentTrack(null);
-              setIsPlaying(false);
-              setPositionMs(0);
-              setSourceNotice(null);
-              setIsDemoMode(false);
-              setIsAudiusMode(false);
-              setIsYouTubeMode(false);
-              setIsAppleMusicMode(false);
-              setService(createSpotifyService(resolveSpotifyToken));
-              setNav([{ screen: 'mainMenu', index: 0 }]);
-            } else {
-              setIsDemoMode(false);
-              setIsAudiusMode(false);
-              setIsYouTubeMode(false);
-              setIsAppleMusicMode(false);
-              redirectToSpotifyLogin();
-            }
+          } else {
+            switchSource(p.id as SourceId);
           }
           break;
         }
@@ -1365,13 +1338,17 @@ export default function App() {
           break;
         }
         case 'settings': {
-          if (idx === 0) toggleShuffle();
-          else if (idx === 1) cycleRepeat();
-          else if (idx === 2) toggleTheme();
-          else if (idx === 3) feedback.toggleSound();
-          else if (idx === 4) feedback.toggleHaptic();
-          else if (idx === 6) window.open(LEGAL_PRIVACY_URL, '_blank', 'noopener,noreferrer');
-          else if (idx === 7) signOut();
+          const item = settingsItems[idx];
+          if (!item) break;
+          if (item.kind === 'shuffle') toggleShuffle();
+          else if (item.kind === 'repeat') cycleRepeat();
+          else if (item.kind === 'theme') toggleTheme();
+          else if (item.kind === 'sound') feedback.toggleSound();
+          else if (item.kind === 'haptics') feedback.toggleHaptic();
+          else if (item.kind === 'privacy') window.open(LEGAL_PRIVACY_URL, '_blank', 'noopener,noreferrer');
+          else if (item.kind === 'terms') window.open(LEGAL_TERMS_URL, '_blank', 'noopener,noreferrer');
+          else if (item.kind === 'signOutSpotify') signOutSpotify();
+          else if (item.kind === 'disconnectApple') disconnectAppleMusic();
           break;
         }
         case 'search': {
@@ -1388,9 +1365,10 @@ export default function App() {
       loadPlaylists, loadAlbums, loadArtists, loadArtistAlbums, loadArtistTopTracks,
       loadPlaylistTracks, loadAlbumTracks,
       loadRecentlyPlayed, loadTrending, playFromList, playContext, openLyrics, toggleShuffle,
-      cycleRepeat, toggleTheme, signOut, handleSearchKey, accessToken,
-      activeProviderId, musicMenuItems, artistMenuItems, switchSource, audio, youtube, apple, resolveSpotifyToken,
-      entrySources, feedback.toggleSound, feedback.toggleHaptic,
+      cycleRepeat, toggleTheme, handleSearchKey,
+      activeProviderId, activeSource, musicMenuItems, artistMenuItems, settingsItems,
+      switchSource, signOutSpotify, disconnectAppleMusic,
+      feedback.toggleSound, feedback.toggleHaptic,
     ]
   );
 
@@ -1428,7 +1406,7 @@ export default function App() {
     // be deps so the wheel sees freshly-loaded lists (else it clamps to length 0).
     [
       currentScreen, seekBy, moveSelection, lyrics,
-      playlists, albums, artists, tracks, trackSource, musicMenuItems, artistMenuItems, entrySources,
+      playlists, albums, artists, tracks, trackSource, musicMenuItems, artistMenuItems, settingsItems,
       feedback.tick,
     ]
   );
@@ -1449,10 +1427,10 @@ export default function App() {
 
   function getListLength(screen: Screen): number {
     switch (screen) {
-      case 'login': return entrySources.length;
+      case 'login': return ENTRY_SOURCES.length;
       case 'mainMenu': return MAIN_MENU.length;
       case 'music': return musicMenuItems.length;
-      case 'settings': return SETTINGS_MENU.length;
+      case 'settings': return settingsItems.length;
       case 'sources': return PROVIDERS.length;
       case 'playlists': return playlists.length;
       case 'albums': return albums.length;
@@ -1499,8 +1477,10 @@ export default function App() {
                 <ScreenContent
                   screen={currentScreen}
                   selectedIndex={selectedIndex}
-                  entrySources={entrySources}
                   mainMenu={MAIN_MENU}
+                  settingsItems={settingsItems}
+                  spotifyConnected={spotifyConnected}
+                  appleConnected={appleConnected}
                   musicMenu={musicMenuItems.map((m) => m.label)}
                   artistMenu={artistMenuItems.map((m) => m.label)}
                   playlists={playlists}
@@ -1522,9 +1502,6 @@ export default function App() {
                   }
                   shuffle={shuffle}
                   repeat={repeat}
-                  theme={theme}
-                  soundEnabled={feedback.soundEnabled}
-                  hapticEnabled={feedback.hapticEnabled}
                   isPlayerReady={isAudius || isYouTube || isAppleMusic ? true : isReady}
                   playerError={
                     isAudius
@@ -1570,8 +1547,11 @@ export default function App() {
 interface ScreenProps {
   screen: Screen;
   selectedIndex: number;
-  entrySources: EntrySource[];
   mainMenu: string[];
+  settingsItems: SettingsEntry[];
+  /** Stored-connection states driving Sources badges + Settings sign-out rows. */
+  spotifyConnected: boolean;
+  appleConnected: boolean;
   musicMenu: string[];
   artistMenu: string[];
   playlists: Playlist[];
@@ -1585,9 +1565,6 @@ interface ScreenProps {
   volumeControllable: boolean;
   shuffle: boolean;
   repeat: RepeatMode;
-  theme: Theme;
-  soundEnabled: boolean;
-  hapticEnabled: boolean;
   isPlayerReady: boolean;
   playerError: string | null;
   searchQuery: string;
@@ -1611,7 +1588,6 @@ function ScreenContent(props: ScreenProps) {
     case 'login':
       return (
         <LoginScreen
-          sources={props.entrySources}
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
           notice={props.sourceNotice}
@@ -1702,16 +1678,7 @@ function ScreenContent(props: ScreenProps) {
     case 'settings':
       return (
         <MenuScreen
-          items={[
-            { label: 'Shuffle', detail: props.shuffle ? 'On' : 'Off' },
-            { label: 'Repeat', detail: repeatLabel(props.repeat) },
-            { label: 'Theme', detail: props.theme === 'black' ? 'Classic' : 'White' },
-            { label: 'Click Sound', detail: props.soundEnabled ? 'On' : 'Off' },
-            { label: 'Haptics', detail: props.hapticEnabled ? 'On' : 'Off' },
-            { label: 'About', detail: 'v1.0' },
-            { label: 'Privacy & Terms', detail: 'bicoastalai.com', arrow: true },
-            { label: 'Sign Out', detail: signOutDetail(props.activeProviderId) },
-          ]}
+          items={props.settingsItems}
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
         />
@@ -1720,6 +1687,8 @@ function ScreenContent(props: ScreenProps) {
       return (
         <SourcesScreen
           activeProviderId={props.activeProviderId}
+          spotifyConnected={props.spotifyConnected}
+          appleConnected={props.appleConnected}
           selectedIndex={selectedIndex}
           onItemClick={onItemClick}
           note={props.sourceNotice ?? props.dataError}
@@ -1768,78 +1737,43 @@ function ScreenContent(props: ScreenProps) {
 // ── Login screen ───────────────────────────────────────────
 
 function LoginScreen({
-  sources,
   selectedIndex,
   onItemClick,
   notice,
 }: {
-  sources: EntrySource[];
   selectedIndex: number;
   onItemClick: (i: number) => void;
   notice: string | null;
 }) {
   const redirectWarning = getRedirectUriWarning();
+  // One status line, like a real iPod: source-selection feedback (connecting /
+  // unavailable / cancelled) first, then config warnings, else the highlighted
+  // row's detail. Never a stack of banners.
+  const warn = notice ?? redirectWarning;
+  const status = warn ?? ENTRY_SOURCES[selectedIndex]?.detail ?? '';
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <div className="login-screen" style={{ flex: 1 }}>
         <div className="login-logo">🎵 OldPod.fm</div>
-        {/* Latest source-selection feedback (connecting / unavailable / cancelled)
-            takes priority, then the redirect-config warning, else the prompt. */}
-        {notice ? (
-          <p className="login-sub login-sub--warn">{notice}</p>
-        ) : redirectWarning ? (
-          <p className="login-sub login-sub--warn">{redirectWarning}</p>
-        ) : (
-          <p className="login-sub">Choose your music</p>
-        )}
+        <p className="login-sub">Choose your music</p>
       </div>
       <ul className="menu-list" aria-label="Choose a music source">
-        {sources.map((s, i) => (
+        {ENTRY_SOURCES.map((s, i) => (
           <li
             key={s.id}
             className={`menu-item${i === selectedIndex ? ' selected' : ''}`}
             onClick={() => onItemClick(i)}
             style={{ cursor: 'pointer' }}
-            aria-label={`${s.label} — ${s.requirement}`}
+            aria-label={`${s.label} — ${s.detail}`}
           >
             <span className="menu-item-text">{s.label}</span>
-            <span style={{ fontSize: '9px', opacity: 0.65, marginRight: '4px', flexShrink: 0 }}>
-              {s.requirement}
-            </span>
             <span className="chevron">›</span>
           </li>
         ))}
       </ul>
-      <div
-        style={{
-          padding: '3px 8px',
-          fontSize: '8px',
-          textAlign: 'center',
-          color: '#666',
-          borderTop: '1px solid rgba(0,0,0,0.08)',
-        }}
-      >
-        <div>More sources in Main Menu › Sources</div>
-        <div style={{ marginTop: '2px' }}>
-          <a
-            href={LEGAL_PRIVACY_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: '#888', textDecoration: 'underline' }}
-          >
-            Privacy
-          </a>
-          {' · '}
-          <a
-            href={LEGAL_TERMS_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: '#888', textDecoration: 'underline' }}
-          >
-            Terms
-          </a>
-        </div>
+      <div className={`gate-status${warn ? ' gate-status--warn' : ''}`} aria-live="polite">
+        {status}
       </div>
     </div>
   );
@@ -1849,19 +1783,28 @@ function LoginScreen({
 
 function SourcesScreen({
   activeProviderId,
+  spotifyConnected,
+  appleConnected,
   selectedIndex,
   onItemClick,
   note,
 }: {
   activeProviderId: ProviderId;
+  spotifyConnected: boolean;
+  appleConnected: boolean;
   selectedIndex: number;
   onItemClick: (i: number) => void;
   note: string | null;
 }) {
+  // Per-provider state: Active (in use now) > Connected (switch instantly,
+  // no re-auth) > Sign in / Needs setup / No account needed.
   const badge = (p: (typeof PROVIDERS)[number]) => {
     if (p.id === activeProviderId) return 'Active';
     if (p.status === 'planned') return 'Soon';
-    return p.capabilities.needsLogin ? 'Sign in' : 'No login';
+    if (p.id === 'spotify') return spotifyConnected ? 'Connected' : 'Sign in';
+    if (p.id === 'applemusic') return appleConnected ? 'Connected' : 'Sign in';
+    if (p.id === 'youtube' && !isYouTubeKeyConfigured()) return 'Needs setup';
+    return 'No account needed';
   };
 
   const selected = PROVIDERS[selectedIndex];
