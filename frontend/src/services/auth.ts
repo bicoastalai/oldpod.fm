@@ -76,8 +76,6 @@ async function sha256(plain: string): Promise<Uint8Array> {
 }
 
 export async function redirectToSpotifyLogin() {
-  localStorage.removeItem('demo_mode');
-
   const verifier = base64url(randomBytes(32));
   const challenge = base64url(await sha256(verifier));
 
@@ -151,11 +149,24 @@ export function getStoredToken(): string | null {
   return token;
 }
 
-/** Clear all stored Spotify tokens and the demo flag (full sign-out). */
+/**
+ * True when a Spotify session exists (a live access token or a refresh token
+ * we can exchange). Used for instant boot/switch decisions without a network
+ * round-trip — an expired access token still counts as connected because
+ * `refreshAccessToken` recovers it lazily.
+ */
+export function isSpotifyConnected(): boolean {
+  return getStoredToken() !== null || localStorage.getItem('spot_refresh') !== null;
+}
+
+/**
+ * Clear the stored Spotify session only. Deliberately does not touch other
+ * providers' state (`source`, `apple_connected`, …) so sign-outs stay
+ * per-provider.
+ */
 export function logout(): void {
   localStorage.removeItem('spot_token');
   localStorage.removeItem('spot_refresh');
   localStorage.removeItem('spot_expires');
-  localStorage.removeItem('demo_mode');
   sessionStorage.removeItem('pkce_verifier');
 }

@@ -294,6 +294,22 @@ export async function authorizeAppleMusic(): Promise<string | null> {
   return userToken ?? null;
 }
 
+/**
+ * Revoke the Music User Token via MusicKit's `unauthorize()` (best effort —
+ * MusicKit v3 keeps its own persisted authorization, so without this a
+ * "disconnected" user would silently re-connect on the next authorize()).
+ * Never throws: when MusicKit can't be bootstrapped there is nothing to
+ * revoke locally, and callers clear the app-side connected flag regardless.
+ */
+export async function unauthorizeAppleMusic(): Promise<void> {
+  try {
+    const music = await ensureAppleMusicConfigured();
+    if (music?.isAuthorized) await music.unauthorize();
+  } catch {
+    /* best effort */
+  }
+}
+
 // ── API request helpers ────────────────────────────────────
 
 function storefront(music: MusicKit.MusicKitInstance): string {
