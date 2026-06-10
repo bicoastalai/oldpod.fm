@@ -127,8 +127,11 @@ async function fetchDeveloperToken(): Promise<DeveloperTokenResult> {
   const timer = setTimeout(() => controller.abort(), TOKEN_FETCH_TIMEOUT_MS);
   let res: Response;
   try {
+    // The token is minted per-request and short-lived; 'no-store' keeps the
+    // HTTP cache from ever replaying an expired/revoked one.
     res = await fetch(DEVELOPER_TOKEN_ENDPOINT, {
       headers: { accept: 'application/json' },
+      cache: 'no-store',
       signal: controller.signal,
     });
   } catch {
@@ -261,6 +264,19 @@ export async function ensureAppleMusicConfigured(): Promise<MusicKit.MusicKitIns
   const instance = await attempt;
   if (!instance) configurePromise = null;
   return instance;
+}
+
+/**
+ * Kick off the MusicKit bootstrap (token fetch + script load + configure)
+ * without awaiting it. Call when a source-selection screen renders so that by
+ * the time the user taps Apple Music the bootstrap is already memoised and
+ * `authorize()` runs within the tap's transient user activation — iOS Safari
+ * blocks the sign-in popup when slow awaits sit between the tap and
+ * `window.open` (https://webkit.org/blog/13862/the-user-activation-api/).
+ */
+export function prewarmAppleMusic(): void {
+  if (knownNotConfigured) return;
+  void ensureAppleMusicConfigured();
 }
 
 /**

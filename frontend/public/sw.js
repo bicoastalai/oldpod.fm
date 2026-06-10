@@ -1,6 +1,9 @@
 // Minimal app-shell service worker. Network-first for navigations (so updates
 // land immediately when online) with a cached fallback for offline use.
-const CACHE = 'oldpod-v1';
+// v2: never touch /api/ and purge v1 caches — v1 cached /api/apple-developer-token
+// forever, so devices kept signing in to Apple Music with a stale/revoked token
+// ("Problem Connecting" on authorize.music.apple.com).
+const CACHE = 'oldpod-v2';
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (event) => {
@@ -19,7 +22,13 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const { request } = event;
-  if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) {
+  const url = new URL(request.url);
+  if (request.method !== 'GET' || url.origin !== self.location.origin) {
+    return;
+  }
+  // API responses (e.g. the short-lived Apple developer token) must always come
+  // from the network — caching them serves expired credentials indefinitely.
+  if (url.pathname.startsWith('/api/')) {
     return;
   }
 

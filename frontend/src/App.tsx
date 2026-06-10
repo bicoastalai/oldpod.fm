@@ -28,6 +28,7 @@ import {
   createAppleMusicService,
   ensureAppleMusicConfigured,
   getAppleMusicBootstrapFailureMessage,
+  prewarmAppleMusic,
 } from './services/apple-music';
 import type {
   Album,
@@ -499,6 +500,16 @@ export default function App() {
       }
     });
   }, [isDemoMode, isAudiusMode, isYouTubeMode, isAppleMusicMode, resolveSpotifyToken]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Pre-warm the MusicKit bootstrap while a source-selection screen is up, so
+  // tapping Apple Music calls authorize() within the tap's user activation —
+  // iOS Safari blocks the sign-in popup if the token fetch / script load /
+  // configure awaits run between the tap and window.open.
+  useEffect(() => {
+    if (currentScreen === 'login' || currentScreen === 'sources') {
+      prewarmAppleMusic();
+    }
+  }, [currentScreen]);
 
   // ── Handle PKCE callback (?code=...) ────────────────────
 
