@@ -2,11 +2,40 @@ import React, { useEffect, useRef } from 'react';
 
 interface Props {
   onScroll: (direction: 'up' | 'down') => void;
-  onClick: (button: 'menu' | 'next' | 'previous' | 'playPause' | 'select') => void;
+  onClick: (button: 'menu' | 'next' | 'previous' | 'playPause' | 'select' | 'home') => void;
 }
+
+// How long MENU must be held to jump to the home menu (classic iPod gesture).
+const MENU_HOLD_MS = 500;
 
 const ClickWheel: React.FC<Props> = ({ onScroll, onClick }) => {
   const wheelRef = useRef<HTMLDivElement>(null);
+
+  // MENU long-press → 'home'. A short press still fires 'menu' (back); the hold
+  // timer fires 'home' and flags the press so the trailing click is swallowed.
+  const menuHoldTimer = useRef<number | null>(null);
+  const menuHeld = useRef(false);
+  const startMenuHold = () => {
+    menuHeld.current = false;
+    menuHoldTimer.current = window.setTimeout(() => {
+      menuHeld.current = true;
+      menuHoldTimer.current = null;
+      onClickRef.current('home');
+    }, MENU_HOLD_MS);
+  };
+  const cancelMenuHold = () => {
+    if (menuHoldTimer.current !== null) {
+      clearTimeout(menuHoldTimer.current);
+      menuHoldTimer.current = null;
+    }
+  };
+  const onMenuClick = () => {
+    if (menuHeld.current) {
+      menuHeld.current = false; // hold already handled it
+      return;
+    }
+    onClickRef.current('menu');
+  };
 
   // Keep the latest callbacks in refs so the long-lived pointer listeners never
   // capture a stale closure and never need to be torn down / re-added.
@@ -109,7 +138,12 @@ const ClickWheel: React.FC<Props> = ({ onScroll, onClick }) => {
       <div ref={wheelRef} className="click-wheel">
         <button
           className="wheel-btn wheel-btn-menu"
-          onClick={() => onClickRef.current('menu')}
+          title="Tap: back · Hold: home"
+          onPointerDown={startMenuHold}
+          onPointerUp={cancelMenuHold}
+          onPointerLeave={cancelMenuHold}
+          onPointerCancel={cancelMenuHold}
+          onClick={onMenuClick}
         >
           MENU
         </button>

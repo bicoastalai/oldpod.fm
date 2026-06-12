@@ -147,6 +147,11 @@ body {
   text-shadow: 0 1px 2px rgba(0,0,0,0.4);
 }
 
+/* Tappable title bar → jump to the home menu (mirrors hold-MENU). */
+.screen-header--home {
+  cursor: pointer;
+}
+
 .screen-body {
   flex: 1;
   overflow: hidden;

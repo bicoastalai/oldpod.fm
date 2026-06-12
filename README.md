@@ -211,14 +211,14 @@ The service worker keeps the PWA shell available offline, but it does not cache 
 
 - Drag clockwise: scroll down; on Now Playing, seek forward when the active source supports seeking
 - Drag counterclockwise: scroll up; on Now Playing, seek backward when the active source supports seeking
-- **Menu**: go back
+- **Menu**: tap to go back; **hold** to jump to the home menu from anywhere
 - **Center**: select; on Now Playing opens **Lyrics**
 - **Play/Pause**: toggle playback
 - **Next / Previous**: skip tracks
 
 Volume controls are hidden or limited on phones because mobile browsers restrict programmatic volume changes. Live radio streams do not support seeking or duration.
 
-You can also click list items and on-screen keys directly with the mouse.
+You can also click list items and on-screen keys directly with the mouse. Tapping the title bar at the top of the screen jumps back to the home menu — the same as holding **Menu**.
 
 ---
 

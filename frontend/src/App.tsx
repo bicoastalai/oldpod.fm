@@ -143,7 +143,7 @@ type ActiveMusicService = MusicProvider & MusicPlayerController;
 
 const SCREEN_TITLES: Record<Screen, string> = {
   login: 'OldPod.fm',
-  mainMenu: 'iPod',
+  mainMenu: 'OldPod',
   music: 'Music',
   playlists: 'Playlists',
   albums: 'Albums',
@@ -256,6 +256,16 @@ export default function App() {
 
   const pop = useCallback(() => {
     setNav((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
+  }, []);
+
+  // Jump straight to the home menu from any depth (hold MENU / tap the title).
+  // No-op on the first-run gate, where no source/home exists yet.
+  const goHome = useCallback(() => {
+    setNav((prev) =>
+      prev[prev.length - 1]?.screen === 'login'
+        ? prev
+        : [{ screen: 'mainMenu', index: 0 }]
+    );
   }, []);
 
   const setIndex = useCallback((idx: number) => {
@@ -1550,17 +1560,18 @@ export default function App() {
   );
 
   const handleClick = useCallback(
-    (button: 'menu' | 'next' | 'previous' | 'playPause' | 'select') => {
+    (button: 'menu' | 'next' | 'previous' | 'playPause' | 'select' | 'home') => {
       feedback.press();
       switch (button) {
         case 'menu': pop(); break;
+        case 'home': goHome(); break;
         case 'playPause': if (currentTrack) togglePlay(); break;
         case 'next': skipNext(); break;
         case 'previous': skipPrev(); break;
         case 'select': doSelect(selectedIndex); break;
       }
     },
-    [selectedIndex, pop, togglePlay, skipNext, skipPrev, doSelect, currentTrack, feedback.press]
+    [selectedIndex, pop, goHome, togglePlay, skipNext, skipPrev, doSelect, currentTrack, feedback.press]
   );
 
   function getListLength(screen: Screen): number {
@@ -1612,7 +1623,13 @@ export default function App() {
         {/* Screen */}
         <div className="ipod-bezel">
           <div className="ipod-screen">
-            <div className="screen-header">{screenTitle}</div>
+            <div
+              className={`screen-header${currentScreen === 'login' ? '' : ' screen-header--home'}`}
+              onClick={currentScreen === 'login' ? undefined : goHome}
+              title={currentScreen === 'login' ? undefined : 'Home'}
+            >
+              {screenTitle}
+            </div>
             <div className="screen-body">
               {isLoading && currentScreen !== 'lyrics' ? (
                 <LoadingView />
