@@ -310,7 +310,7 @@ Your Spotify user must still be listed under **User Management** while the app i
 - [x] Podcasts through iTunes Search, RSS proxying, and HTML5 audio
 - [x] Apple Music (MusicKit JS + serverless developer-token endpoint)
 - [ ] Shareable mixtapes
-- [ ] Now Playing share cards
+- [x] Now Playing share cards
 - [ ] Cover Flow album view
 - [ ] Playlists and on-the-go playlist building
 

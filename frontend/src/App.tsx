@@ -55,6 +55,7 @@ import {
   redirectToSpotifyLogin,
 } from './services/auth';
 import { fetchLyrics, type TrackLyrics } from './services/lyrics';
+import { canShareFiles, renderShareCard, shareCard } from './services/shareCard';
 import { getProviderMeta, PROVIDERS } from './services/providers/registry';
 
 // ── Types ──────────────────────────────────────────────────
@@ -70,6 +71,7 @@ type Screen =
   | 'tracks'
   | 'nowPlaying'
   | 'lyrics'
+  | 'share'
   | 'settings'
   | 'sources'
   | 'search';
@@ -150,6 +152,7 @@ const SCREEN_TITLES: Record<Screen, string> = {
   tracks: 'Songs',
   nowPlaying: 'Now Playing',
   lyrics: 'Lyrics',
+  share: 'Share',
   settings: 'Settings',
   sources: 'Sources',
   search: 'Search',
@@ -339,6 +342,14 @@ export default function App() {
   const [lyricsLoading, setLyricsLoading] = useState(false);
   const [lyricsUserScrolled, setLyricsUserScrolled] = useState(false);
   const lyricsTrackIdRef = useRef<string | null>(null);
+
+  // Share card (Now Playing → Share). The card is rendered to a PNG blob when
+  // the Share screen opens; `shareUrl` is its object URL for the on-screen
+  // preview, and `shareBlob` is what the Select button hands to the Web Share
+  // sheet (pre-rendered so the share fires synchronously inside the gesture).
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [shareBlob, setShareBlob] = useState<Blob | null>(null);
+  const [shareStatus, setShareStatus] = useState<'idle' | 'rendering' | 'ready' | 'error'>('idle');
 
   // Playback options
   const [shuffle, setShuffle] = useState(false);
@@ -1122,6 +1133,47 @@ export default function App() {
     setIndex(0);
   }, [currentTrack, push, setIndex]);
 
+  // ── Share card ────────────────────────────────────────────
+
+  const openShare = useCallback(() => {
+    if (!currentTrack) return;
+    push('share');
+    setIndex(0);
+  }, [currentTrack, push, setIndex]);
+
+  // Render the card whenever the Share screen is showing for the current track.
+  // Pre-rendering here (not on the Select press) keeps the Web Share user
+  // gesture intact: `doShare` just hands off the ready blob.
+  useEffect(() => {
+    if (currentScreen !== 'share' || !currentTrack) return;
+    let cancelled = false;
+    let url: string | null = null;
+    setShareStatus('rendering');
+    setShareUrl(null);
+    setShareBlob(null);
+    renderShareCard(currentTrack)
+      .then((blob) => {
+        if (cancelled) return;
+        url = URL.createObjectURL(blob);
+        setShareBlob(blob);
+        setShareUrl(url);
+        setShareStatus('ready');
+      })
+      .catch(() => {
+        if (!cancelled) setShareStatus('error');
+      });
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentScreen, currentTrack?.id]);
+
+  const doShare = useCallback(() => {
+    if (!shareBlob || !currentTrack) return;
+    void shareCard(shareBlob, currentTrack);
+  }, [shareBlob, currentTrack]);
+
   // ── Search key handling ──────────────────────────────────
 
   const submitSearch = useCallback(
@@ -1441,13 +1493,16 @@ export default function App() {
         case 'nowPlaying':
           openLyrics();
           break;
+        case 'share':
+          doShare();
+          break;
       }
     },
     [
       currentScreen, push, playlists, albums, artists, selectedArtist, tracks, trackSource,
       loadPlaylists, loadAlbums, loadArtists, loadArtistAlbums, loadArtistTopTracks,
       loadPlaylistTracks, loadAlbumTracks,
-      loadRecentlyPlayed, loadTrending, loadTrendingShows, playFromList, playContext, openLyrics, toggleShuffle,
+      loadRecentlyPlayed, loadTrending, loadTrendingShows, playFromList, playContext, openLyrics, doShare, toggleShuffle,
       cycleRepeat, toggleTheme, handleSearchKey,
       activeProviderId, activeSource, musicMenuItems, artistMenuItems, settingsItems,
       switchSource, signOutSpotify, disconnectAppleMusic,
@@ -1608,6 +1663,9 @@ export default function App() {
                   lyrics={lyrics}
                   lyricsLoading={lyricsLoading}
                   lyricsUserScrolled={lyricsUserScrolled}
+                  shareUrl={shareUrl}
+                  shareStatus={shareStatus}
+                  onShare={openShare}
                   onItemClick={handleItemClick}
                   onSearchChange={setSearchQuery}
                   onSearchSubmit={submitSearch}
@@ -1664,6 +1722,9 @@ interface ScreenProps {
   lyrics: TrackLyrics | null;
   lyricsLoading: boolean;
   lyricsUserScrolled: boolean;
+  shareUrl: string | null;
+  shareStatus: 'idle' | 'rendering' | 'ready' | 'error';
+  onShare: () => void;
   onItemClick: (index: number) => void;
   onSearchChange: (value: string) => void;
   onSearchSubmit: (value: string) => void;
@@ -1805,6 +1866,16 @@ function ScreenContent(props: ScreenProps) {
           isPlayerReady={props.isPlayerReady}
           playerError={props.playerError}
           providerId={props.activeProviderId}
+          onShare={props.onShare}
+        />
+      );
+    case 'share':
+      return (
+        <ShareScreen
+          track={props.currentTrack}
+          shareUrl={props.shareUrl}
+          status={props.shareStatus}
+          onShare={props.onShare}
         />
       );
     case 'lyrics':
@@ -2029,6 +2100,7 @@ function NowPlayingScreen({
   isPlayerReady,
   playerError,
   providerId,
+  onShare,
 }: {
   track: Track | null;
   isPlaying: boolean;
@@ -2040,6 +2112,7 @@ function NowPlayingScreen({
   isPlayerReady: boolean;
   playerError: string | null;
   providerId: ProviderId;
+  onShare: () => void;
 }) {
   if (!track) {
     return (
@@ -2066,6 +2139,21 @@ function NowPlayingScreen({
 
   return (
     <div className="now-playing">
+      {/* Share affordance — the app supports direct taps on on-screen controls,
+          so this is reachable without spending a (taken) click-wheel zone. */}
+      <button
+        type="button"
+        className="np-share"
+        title="Share this song"
+        aria-label="Share this song"
+        onClick={(e) => {
+          e.stopPropagation();
+          onShare();
+        }}
+      >
+        ⤴
+      </button>
+
       {/* Top row: art + track info */}
       <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
         <div className="album-art" style={{ background: artColor }}>
@@ -2144,6 +2232,59 @@ function NowPlayingScreen({
           ♫ Apple Music
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Share screen ───────────────────────────────────────────
+
+function ShareScreen({
+  track,
+  shareUrl,
+  status,
+  onShare,
+}: {
+  track: Track | null;
+  shareUrl: string | null;
+  status: 'idle' | 'rendering' | 'ready' | 'error';
+  onShare: () => void;
+}) {
+  if (!track) {
+    return (
+      <div className="share-screen share-screen--empty">Nothing playing</div>
+    );
+  }
+
+  const action = canShareFiles() ? 'Share' : 'Save';
+
+  return (
+    <div className="share-screen">
+      <div className="share-preview">
+        {status === 'ready' && shareUrl ? (
+          <img src={shareUrl} alt="Share card preview" className="share-card-img" />
+        ) : status === 'error' ? (
+          <div className="share-preview-msg">Couldn’t make a card</div>
+        ) : (
+          <div className="share-preview-msg">
+            <span className="loading-dots">
+              <span className="loading-dot" />
+              <span className="loading-dot" />
+              <span className="loading-dot" />
+            </span>
+          </div>
+        )}
+      </div>
+      <button
+        type="button"
+        className="share-action"
+        disabled={status !== 'ready'}
+        onClick={(e) => {
+          e.stopPropagation();
+          onShare();
+        }}
+      >
+        {status === 'ready' ? `Center · ${action}` : 'Making card…'}
+      </button>
     </div>
   );
 }
