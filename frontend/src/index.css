@@ -201,11 +201,37 @@ body {
 
 /* ── Now Playing screen ── */
 .now-playing {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
   padding: 6px 8px 4px;
   gap: 4px;
+}
+
+.np-share {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 5;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.12);
+  color: #1a1a1a;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease;
+}
+
+.np-share:hover {
+  background: rgba(0, 0, 0, 0.24);
 }
 
 .album-art {
@@ -819,4 +845,60 @@ body {
 @keyframes bounce {
   0%, 80%, 100% { transform: scale(0.7); opacity: 0.5; }
   40% { transform: scale(1); opacity: 1; }
+}
+
+/* ── Share card screen ── */
+.share-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 6px 8px 8px;
+  gap: 6px;
+}
+
+.share-screen--empty {
+  font-size: 11px;
+  color: #555;
+}
+
+.share-preview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+.share-card-img {
+  max-height: 100%;
+  max-width: 100%;
+  height: auto;
+  width: auto;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.share-preview-msg {
+  font-size: 10px;
+  color: #555;
+}
+
+.share-action {
+  flex-shrink: 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.share-action:disabled {
+  background: rgba(0, 0, 0, 0.25);
+  cursor: default;
 }
