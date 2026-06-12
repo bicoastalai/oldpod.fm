@@ -190,11 +190,13 @@ export async function renderShareCard(track: Track): Promise<Blob> {
   const [artistLine] = wrapLines(ctx, track.artist, SIZE - 160, 1);
   ctx.fillText(artistLine, SIZE / 2, ty - 4);
 
-  // Footer wordmark: "oldpod" white, ".fm" tinted with a lightened album color.
+  // Footer wordmark: brand name "OldPod" — "Old" white, "Pod" tinted with a
+  // lightened album color. Intentionally not a URL: the .fm domain isn't the
+  // live site (oldpod.online), so the card carries the brand, not an address.
   const footY = SIZE - 60;
   ctx.font = `800 44px ${sans}`;
-  const wmA = 'oldpod';
-  const wmB = '.fm';
+  const wmA = 'Old';
+  const wmB = 'Pod';
   const wA = ctx.measureText(wmA).width;
   const wB = ctx.measureText(wmB).width;
   const glyph = '♪ ';
@@ -252,7 +254,7 @@ export async function shareCard(blob: Blob, track: Track): Promise<'shared' | 'd
     try {
       await navigator.share({
         files: [file],
-        title: 'OldPod.fm',
+        title: 'OldPod',
         text: `${track.name} — ${track.artist}`,
       });
       return 'shared';
